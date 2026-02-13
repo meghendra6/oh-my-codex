@@ -705,6 +705,13 @@ async function syncLinkedRalphOnTeamTerminal(stateRootDir, nowIso) {
   }
 }
 
+function parseTeamWorkerEnv(rawValue) {
+  if (typeof rawValue !== 'string') return null;
+  const match = /^([a-z0-9][a-z0-9-]{0,29})\/(worker-\d+)$/.exec(rawValue.trim());
+  if (!match) return null;
+  return { teamName: match[1], workerName: match[2] };
+}
+
 async function main() {
   const rawPayload = process.argv[process.argv.length - 1];
   if (!rawPayload || rawPayload.startsWith('-')) {
@@ -752,7 +759,8 @@ async function main() {
 
   // Team worker detection via environment variable
   const teamWorkerEnv = process.env.OMX_TEAM_WORKER; // e.g., "fix-ts/worker-1"
-  const isTeamWorker = !!teamWorkerEnv;
+  const parsedTeamWorker = parseTeamWorkerEnv(teamWorkerEnv);
+  const isTeamWorker = !!parsedTeamWorker;
 
   // 1. Log the turn
   const logEntry = {
@@ -798,88 +806,91 @@ async function main() {
     await syncLinkedRalphOnTeamTerminal(stateDir, new Date().toISOString());
   }
 
-  // 3. Track subagent metrics
-  const metricsPath = join(omxDir, 'metrics.json');
-  try {
-    let metrics = {
-      total_turns: 0,
-      session_turns: 0,
-      last_activity: '',
-      session_input_tokens: 0,
-      session_output_tokens: 0,
-      session_total_tokens: 0,
-    };
-    if (existsSync(metricsPath)) {
-      metrics = { ...metrics, ...JSON.parse(await readFile(metricsPath, 'utf-8')) };
-    }
-
-    const tokenUsage = getSessionTokenUsage(payload);
-    const quotaUsage = getQuotaUsage(payload);
-
-    metrics.total_turns++;
-    metrics.session_turns++;
-    metrics.last_activity = new Date().toISOString();
-
-    if (tokenUsage) {
-      if (tokenUsage.input !== null) {
-        if (tokenUsage.inputCumulative) {
-          metrics.session_input_tokens = tokenUsage.input;
-        } else {
-          metrics.session_input_tokens = (metrics.session_input_tokens || 0) + tokenUsage.input;
-        }
+  // 3. Track subagent metrics (lead session only)
+  if (!isTeamWorker) {
+    const metricsPath = join(omxDir, 'metrics.json');
+    try {
+      let metrics = {
+        total_turns: 0,
+        session_turns: 0,
+        last_activity: '',
+        session_input_tokens: 0,
+        session_output_tokens: 0,
+        session_total_tokens: 0,
+      };
+      if (existsSync(metricsPath)) {
+        metrics = { ...metrics, ...JSON.parse(await readFile(metricsPath, 'utf-8')) };
       }
-      if (tokenUsage.output !== null) {
-        if (tokenUsage.outputCumulative) {
-          metrics.session_output_tokens = tokenUsage.output;
-        } else {
-          metrics.session_output_tokens = (metrics.session_output_tokens || 0) + tokenUsage.output;
+
+      const tokenUsage = getSessionTokenUsage(payload);
+      const quotaUsage = getQuotaUsage(payload);
+
+      metrics.total_turns++;
+      metrics.session_turns++;
+      metrics.last_activity = new Date().toISOString();
+
+      if (tokenUsage) {
+        if (tokenUsage.input !== null) {
+          if (tokenUsage.inputCumulative) {
+            metrics.session_input_tokens = tokenUsage.input;
+          } else {
+            metrics.session_input_tokens = (metrics.session_input_tokens || 0) + tokenUsage.input;
+          }
         }
-      }
-      if (tokenUsage.total !== null) {
-        if (tokenUsage.totalCumulative) {
-          metrics.session_total_tokens = tokenUsage.total;
+        if (tokenUsage.output !== null) {
+          if (tokenUsage.outputCumulative) {
+            metrics.session_output_tokens = tokenUsage.output;
+          } else {
+            metrics.session_output_tokens = (metrics.session_output_tokens || 0) + tokenUsage.output;
+          }
+        }
+        if (tokenUsage.total !== null) {
+          if (tokenUsage.totalCumulative) {
+            metrics.session_total_tokens = tokenUsage.total;
+          } else {
+            metrics.session_total_tokens = (metrics.session_total_tokens || 0) + tokenUsage.total;
+          }
         } else {
-          metrics.session_total_tokens = (metrics.session_total_tokens || 0) + tokenUsage.total;
+          metrics.session_total_tokens = (metrics.session_input_tokens || 0) + (metrics.session_output_tokens || 0);
         }
       } else {
         metrics.session_total_tokens = (metrics.session_input_tokens || 0) + (metrics.session_output_tokens || 0);
       }
-    } else {
-      metrics.session_total_tokens = (metrics.session_input_tokens || 0) + (metrics.session_output_tokens || 0);
-    }
 
-    if (quotaUsage) {
-      if (quotaUsage.fiveHourLimitPct !== null) metrics.five_hour_limit_pct = quotaUsage.fiveHourLimitPct;
-      if (quotaUsage.weeklyLimitPct !== null) metrics.weekly_limit_pct = quotaUsage.weeklyLimitPct;
-    }
+      if (quotaUsage) {
+        if (quotaUsage.fiveHourLimitPct !== null) metrics.five_hour_limit_pct = quotaUsage.fiveHourLimitPct;
+        if (quotaUsage.weeklyLimitPct !== null) metrics.weekly_limit_pct = quotaUsage.weeklyLimitPct;
+      }
 
-    await writeFile(metricsPath, JSON.stringify(metrics, null, 2));
-  } catch {
-    // Non-critical
+      await writeFile(metricsPath, JSON.stringify(metrics, null, 2));
+    } catch {
+      // Non-critical
+    }
   }
 
-  // 4. Write HUD state summary for `omx hud`
-  const hudStatePath = join(stateDir, 'hud-state.json');
-  try {
-    let hudState = { last_turn_at: '', turn_count: 0 };
-    if (existsSync(hudStatePath)) {
-      hudState = JSON.parse(await readFile(hudStatePath, 'utf-8'));
+  // 4. Write HUD state summary for `omx hud` (lead session only)
+  if (!isTeamWorker) {
+    const hudStatePath = join(stateDir, 'hud-state.json');
+    try {
+      let hudState = { last_turn_at: '', turn_count: 0 };
+      if (existsSync(hudStatePath)) {
+        hudState = JSON.parse(await readFile(hudStatePath, 'utf-8'));
+      }
+      hudState.last_turn_at = new Date().toISOString();
+      hudState.turn_count = (hudState.turn_count || 0) + 1;
+      hudState.last_agent_output = (payload['last-assistant-message'] || payload.last_assistant_message || '')
+        .slice(0, 100);
+      await writeFile(hudStatePath, JSON.stringify(hudState, null, 2));
+    } catch {
+      // Non-critical
     }
-    hudState.last_turn_at = new Date().toISOString();
-    hudState.turn_count = (hudState.turn_count || 0) + 1;
-    hudState.last_agent_output = (payload['last-assistant-message'] || payload.last_assistant_message || '')
-      .slice(0, 100);
-    await writeFile(hudStatePath, JSON.stringify(hudState, null, 2));
-  } catch {
-    // Non-critical
   }
 
   // 4.5. Update team worker heartbeat (if applicable)
   if (isTeamWorker) {
     try {
-      const parts = teamWorkerEnv.split('/');
-      if (parts.length === 2) {
-        const [twTeamName, twWorkerName] = parts;
+      if (parsedTeamWorker) {
+        const { teamName: twTeamName, workerName: twWorkerName } = parsedTeamWorker;
         const heartbeatPath = join(stateDir, 'team', twTeamName, 'workers', twWorkerName, 'heartbeat.json');
         let turnCount = 0;
         try {

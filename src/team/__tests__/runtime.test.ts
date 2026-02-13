@@ -103,7 +103,7 @@ describe('runtime', () => {
 
       const worker1 = snapshot?.workers.find((w) => w.name === 'worker-1');
       assert.ok(worker1);
-      assert.equal(worker1?.turnsWithoutProgress, 7);
+      assert.equal(worker1?.turnsWithoutProgress, 0);
 
       const reassignHint = snapshot?.recommendations.some((r) => r.includes(`task-${t2.id}`));
       assert.equal(typeof reassignHint, 'boolean');
@@ -113,7 +113,7 @@ describe('runtime', () => {
     }
   });
 
-  it("shutdownTeam cleans up state even when tmux session doesn't exist", async () => {
+  it('shutdownTeam cleans up state even when tmux session doesn\'t exist', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-'));
     try {
       await initTeamState('team-shutdown', 'shutdown test', 'executor', 1, cwd);

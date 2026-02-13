@@ -36,7 +36,7 @@ describe('team state', () => {
 
       const configPath = join(root, 'config.json');
       assert.equal(existsSync(configPath), true);
-      const diskCfg = JSON.parse(readFileSync(configPath, 'utf8')) as any;
+      const diskCfg = JSON.parse(readFileSync(configPath, 'utf8')) as unknown as { [key: string]: unknown };
 
       assert.equal(cfg.name, 'team-1');
       assert.equal(diskCfg.name, 'team-1');
@@ -45,6 +45,7 @@ describe('team state', () => {
       assert.equal(diskCfg.worker_count, 2);
       assert.equal(diskCfg.max_workers, DEFAULT_MAX_WORKERS);
       assert.equal(diskCfg.tmux_session, 'omx-team-team-1');
+      assert.equal(typeof diskCfg.next_task_id, 'number');
       assert.ok(Array.isArray(diskCfg.workers));
       assert.equal(diskCfg.workers.length, 2);
     } finally {
@@ -184,7 +185,7 @@ describe('team state', () => {
     }
   });
 
-  it("readWorkerStatus returns {state:'unknown'} on missing file", async () => {
+  it('readWorkerStatus returns {state:\'unknown\'} on missing file', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-state-'));
     try {
       await initTeamState('team-8', 't', 'executor', 1, cwd);

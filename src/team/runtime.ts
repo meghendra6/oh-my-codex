@@ -1,5 +1,4 @@
 import { join } from 'path';
-import { existsSync } from 'fs';
 import {
   sanitizeTeamName,
   isTmuxAvailable,
@@ -11,7 +10,6 @@ import {
   killWorker,
   destroyTeamSession,
   listTeamSessions,
-  type TeamSession,
 } from './tmux-session.js';
 import {
   initTeamState,
@@ -24,7 +22,6 @@ import {
   readTask,
   updateTask,
   listTasks,
-  getTeamSummary,
   cleanupTeamState,
   type TeamConfig,
   type WorkerInfo,
@@ -42,13 +39,7 @@ import {
   generateShutdownInbox,
   generateTriggerMessage,
 } from './worker-bootstrap.js';
-import {
-  type TeamPhase,
-  type TerminalPhase,
-  createTeamState as createOrchestratorState,
-  transitionPhase,
-  isTerminalPhase,
-} from './orchestrator.js';
+import { type TeamPhase, type TerminalPhase } from './orchestrator.js';
 
 /** Snapshot of the team state at a point in time */
 export interface TeamSnapshot {
@@ -213,11 +204,19 @@ export async function startTeam(
  * Monitor team state by polling files. Returns a snapshot.
  */
 export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSnapshot | null> {
-  const config = await readTeamConfig(teamName, cwd);
+  const sanitized = sanitizeTeamName(teamName);
+  const config = await readTeamConfig(sanitized, cwd);
   if (!config) return null;
 
   const sessionName = config.tmux_session;
-  const allTasks = await listTasks(teamName, cwd);
+  const allTasks = await listTasks(sanitized, cwd);
+  const inProgressByOwner = new Map<string, TeamTask[]>();
+  for (const task of allTasks) {
+    if (task.status !== 'in_progress' || !task.owner) continue;
+    const existing = inProgressByOwner.get(task.owner) || [];
+    existing.push(task);
+    inProgressByOwner.set(task.owner, existing);
+  }
 
   const workers: TeamSnapshot['workers'] = [];
   const deadWorkers: string[] = [];
@@ -226,18 +225,13 @@ export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSn
 
   for (const w of config.workers) {
     const alive = isWorkerAlive(sessionName, w.index);
-    const status = await readWorkerStatus(teamName, w.name, cwd);
-    const heartbeat = await readWorkerHeartbeat(teamName, w.name, cwd);
+    const [status, heartbeat] = await Promise.all([
+      readWorkerStatus(sanitized, w.name, cwd),
+      readWorkerHeartbeat(sanitized, w.name, cwd),
+    ]);
 
-    // Calculate turns without progress
-    let turnsWithoutProgress = 0;
-    if (heartbeat && status.state === 'working' && status.current_task_id) {
-      const task = await readTask(teamName, status.current_task_id, cwd);
-      if (task && task.status === 'in_progress') {
-        // If heartbeat shows activity but task hasn't changed, count turns
-        turnsWithoutProgress = heartbeat.turn_count; // simplified: would need previous snapshot to track delta
-      }
-    }
+    // Progress delta tracking needs previous snapshot state; avoid false positives.
+    const turnsWithoutProgress = 0;
 
     workers.push({
       name: w.name,
@@ -251,7 +245,7 @@ export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSn
     if (!alive) {
       deadWorkers.push(w.name);
       // Find in-progress tasks owned by this dead worker
-      const deadWorkerTasks = allTasks.filter(t => t.owner === w.name && t.status === 'in_progress');
+      const deadWorkerTasks = inProgressByOwner.get(w.name) || [];
       for (const t of deadWorkerTasks) {
         recommendations.push(`Reassign task-${t.id} from dead ${w.name}`);
       }
@@ -281,7 +275,7 @@ export async function monitorTeam(teamName: string, cwd: string): Promise<TeamSn
   else if (allTasksTerminal && taskCounts.failed > 0) phase = 'team-fix';
 
   return {
-    teamName,
+    teamName: sanitized,
     phase,
     workers,
     tasks: {
@@ -304,24 +298,25 @@ export async function assignTask(
   taskId: string,
   cwd: string,
 ): Promise<void> {
-  const task = await readTask(teamName, taskId, cwd);
+  const sanitized = sanitizeTeamName(teamName);
+  const task = await readTask(sanitized, taskId, cwd);
   if (!task) throw new Error(`Task ${taskId} not found`);
 
   // Update task owner
-  await updateTask(teamName, taskId, { owner: workerName }, cwd);
+  await updateTask(sanitized, taskId, { owner: workerName }, cwd);
 
   // Write inbox
-  const inbox = generateTaskAssignmentInbox(workerName, teamName, taskId, task.description);
-  await writeWorkerInbox(teamName, workerName, inbox, cwd);
+  const inbox = generateTaskAssignmentInbox(workerName, sanitized, taskId, task.description);
+  await writeWorkerInbox(sanitized, workerName, inbox, cwd);
 
   // Send trigger
-  const config = await readTeamConfig(teamName, cwd);
-  if (!config) throw new Error(`Team ${teamName} not found`);
+  const config = await readTeamConfig(sanitized, cwd);
+  if (!config) throw new Error(`Team ${sanitized} not found`);
 
   const workerInfo = config.workers.find(w => w.name === workerName);
   if (!workerInfo) throw new Error(`Worker ${workerName} not found in team`);
 
-  const trigger = generateTriggerMessage(workerName, teamName);
+  const trigger = generateTriggerMessage(workerName, sanitized);
   sendToWorker(config.tmux_session, workerInfo.index, trigger);
 }
 
@@ -342,11 +337,12 @@ export async function reassignTask(
  * Graceful shutdown: send shutdown inbox to all workers, wait, force kill, cleanup.
  */
 export async function shutdownTeam(teamName: string, cwd: string): Promise<void> {
-  const config = await readTeamConfig(teamName, cwd);
+  const sanitized = sanitizeTeamName(teamName);
+  const config = await readTeamConfig(sanitized, cwd);
   if (!config) {
     // No config -- just try to kill tmux session and clean up
-    try { destroyTeamSession(`omx-team-${teamName}`); } catch { /* ignore */ }
-    await cleanupTeamState(teamName, cwd);
+    try { destroyTeamSession(`omx-team-${sanitized}`); } catch { /* ignore */ }
+    await cleanupTeamState(sanitized, cwd);
     return;
   }
 
@@ -356,8 +352,8 @@ export async function shutdownTeam(teamName: string, cwd: string): Promise<void>
   const shutdownContent = generateShutdownInbox();
   for (const w of config.workers) {
     try {
-      await writeWorkerInbox(teamName, w.name, shutdownContent, cwd);
-      const trigger = generateTriggerMessage(w.name, teamName);
+      await writeWorkerInbox(sanitized, w.name, shutdownContent, cwd);
+      const trigger = generateTriggerMessage(w.name, sanitized);
       sendToWorker(sessionName, w.index, trigger);
     } catch { /* worker might already be dead */ }
   }
@@ -388,14 +384,15 @@ export async function shutdownTeam(teamName: string, cwd: string): Promise<void>
   try { await stripWorkerOverlay(agentsMdPath); } catch { /* ignore */ }
 
   // 6. Cleanup state
-  await cleanupTeamState(teamName, cwd);
+  await cleanupTeamState(sanitized, cwd);
 }
 
 /**
  * Resume monitoring an existing team.
  */
 export async function resumeTeam(teamName: string, cwd: string): Promise<TeamRuntime | null> {
-  const config = await readTeamConfig(teamName, cwd);
+  const sanitized = sanitizeTeamName(teamName);
+  const config = await readTeamConfig(sanitized, cwd);
   if (!config) return null;
 
   // Check if tmux session still exists
@@ -403,8 +400,8 @@ export async function resumeTeam(teamName: string, cwd: string): Promise<TeamRun
   if (!sessions.includes(config.tmux_session)) return null;
 
   return {
-    teamName,
-    sanitizedName: teamName,
+    teamName: sanitized,
+    sanitizedName: sanitized,
     sessionName: config.tmux_session,
     config,
     cwd,

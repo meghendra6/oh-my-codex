@@ -49,8 +49,7 @@ export function isTmuxAvailable(): boolean {
 
 // Create tmux session with N worker windows
 // Window 0: "monitor" (for HUD)
-// Windows 1..N: "worker-{i}" each running codex in bypass mode to avoid
-// interactive trust prompts that can block unattended worker bootstrap.
+// Windows 1..N: "worker-{i}" each running codex.
 // Returns TeamSession or throws if tmux not available
 export function createTeamSession(teamName: string, workerCount: number, cwd: string): TeamSession {
   if (!isTmuxAvailable()) {
@@ -69,7 +68,7 @@ export function createTeamSession(teamName: string, workerCount: number, cwd: st
   }
 
   for (let i = 1; i <= workerCount; i++) {
-    const cmd = `env OMX_TEAM_WORKER=${safeTeamName}/worker-${i} codex --dangerously-bypass-approvals-and-sandbox`;
+    const cmd = `env OMX_TEAM_WORKER=${safeTeamName}/worker-${i} codex`;
     const win = runTmux(['new-window', '-t', sessionName, '-n', `worker-${i}`, '-c', cwd, cmd]);
     if (!win.ok) {
       throw new Error(`failed to create worker window ${i}: ${win.stderr}`);
@@ -103,6 +102,10 @@ function paneLooksReady(captured: string): boolean {
   return false;
 }
 
+function paneHasTrustPrompt(captured: string): boolean {
+  return /Do you trust the contents of this directory\?/i.test(captured);
+}
+
 // Poll tmux capture-pane for Codex prompt indicator (> or similar)
 // Uses exponential backoff: 1s, 2s, 4s, 8s (total ~15s)
 // Returns true if ready, false on timeout
@@ -113,6 +116,14 @@ export function waitForWorkerReady(sessionName: string, workerIndex: number, tim
   const check = (): boolean => {
     const result = runTmux(['capture-pane', '-t', paneTarget(sessionName, workerIndex), '-p']);
     if (!result.ok) return false;
+    if (paneHasTrustPrompt(result.stdout)) {
+      // Opt-in only: do not auto-trust directories unless explicitly configured.
+      if (process.env.OMX_TEAM_AUTO_TRUST === '1') {
+        runTmux(['send-keys', '-t', paneTarget(sessionName, workerIndex), 'Enter']);
+        return false;
+      }
+      return false;
+    }
     return paneLooksReady(result.stdout);
   };
 
@@ -170,8 +181,28 @@ export function getWorkerPanePid(sessionName: string, workerIndex: number): numb
 
 // Check if worker's tmux pane has a running process
 export function isWorkerAlive(sessionName: string, workerIndex: number): boolean {
-  const pid = getWorkerPanePid(sessionName, workerIndex);
-  if (pid === null) return false;
+  const result = runTmux([
+    'list-panes',
+    '-t',
+    paneTarget(sessionName, workerIndex),
+    '-F',
+    '#{pane_dead} #{pane_current_command} #{pane_pid}',
+  ]);
+  if (!result.ok) return false;
+
+  const line = result.stdout.split('\n')[0]?.trim();
+  if (!line) return false;
+
+  const parts = line.split(/\s+/);
+  if (parts.length < 3) return false;
+
+  const paneDead = parts[0];
+  const paneCommand = parts[1] || '';
+  const pid = Number.parseInt(parts[2], 10);
+
+  if (paneDead === '1') return false;
+  if (!Number.isFinite(pid)) return false;
+  if (!/codex/i.test(paneCommand)) return false;
 
   try {
     process.kill(pid, 0);

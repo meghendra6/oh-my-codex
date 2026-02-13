@@ -12,6 +12,7 @@ export interface TeamConfig {
   workers: WorkerInfo[];
   created_at: string;
   tmux_session: string; // "omx-team-{name}"
+  next_task_id: number;
 }
 
 export interface WorkerInfo {
@@ -118,7 +119,7 @@ export async function writeAtomic(filePath: string, data: string): Promise<void>
   const parent = dirname(filePath);
   await mkdir(parent, { recursive: true });
 
-  const tmpPath = `${filePath}.tmp.${process.pid}`;
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
   await writeFile(tmpPath, data, 'utf8');
 
   try {
@@ -177,10 +178,23 @@ export async function initTeamState(
     workers,
     created_at: new Date().toISOString(),
     tmux_session: `omx-team-${teamName}`,
+    next_task_id: 1,
   };
 
   await writeAtomic(join(root, 'config.json'), JSON.stringify(config, null, 2));
   return config;
+}
+
+async function writeConfig(cfg: TeamConfig, cwd: string): Promise<void> {
+  const p = join(teamDir(cfg.name, cwd), 'config.json');
+  await writeAtomic(p, JSON.stringify(cfg, null, 2));
+}
+
+function normalizeNextTaskId(raw: unknown): number {
+  const asNum = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(asNum)) return 1;
+  const floored = Math.floor(asNum);
+  return Math.max(1, floored);
 }
 
 // Read team config
@@ -269,37 +283,56 @@ function taskFilePath(teamName: string, taskId: string, cwd: string): string {
   return join(teamDir(teamName, cwd), 'tasks', `task-${taskId}.json`);
 }
 
+async function withTeamLock<T>(teamName: string, cwd: string, fn: () => Promise<T>): Promise<T> {
+  const lockDir = join(teamDir(teamName, cwd), '.lock.create-task');
+  const deadline = Date.now() + 5000;
+  while (true) {
+    try {
+      await mkdir(lockDir);
+      break;
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code !== 'EEXIST') throw error;
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out acquiring team task lock for ${teamName}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  try {
+    return await fn();
+  } finally {
+    await rm(lockDir, { recursive: true, force: true });
+  }
+}
+
 // Create a task (auto-increment ID)
 export async function createTask(
   teamName: string,
   task: Omit<TeamTask, 'id' | 'created_at'>,
   cwd: string
 ): Promise<TeamTask> {
-  const tasksRoot = join(teamDir(teamName, cwd), 'tasks');
-  await mkdir(tasksRoot, { recursive: true });
+  return withTeamLock(teamName, cwd, async () => {
+    const cfg = await readTeamConfig(teamName, cwd);
+    if (!cfg) throw new Error(`Team ${teamName} not found`);
 
-  let maxId = 0;
-  try {
-    const files = await readdir(tasksRoot);
-    for (const f of files) {
-      const m = /^task-(\d+)\.json$/.exec(f);
-      if (!m) continue;
-      const id = Number(m[1]);
-      if (Number.isFinite(id) && id > maxId) maxId = id;
-    }
-  } catch {
-    // ignore
-  }
+    const nextNumeric = normalizeNextTaskId(cfg.next_task_id);
+    const nextId = String(nextNumeric);
 
-  const nextId = String(maxId + 1);
-  const created: TeamTask = {
-    ...task,
-    id: nextId,
-    created_at: new Date().toISOString(),
-  };
+    const created: TeamTask = {
+      ...task,
+      id: nextId,
+      created_at: new Date().toISOString(),
+    };
 
-  await writeAtomic(taskFilePath(teamName, nextId, cwd), JSON.stringify(created, null, 2));
-  return created;
+    await writeAtomic(taskFilePath(teamName, nextId, cwd), JSON.stringify(created, null, 2));
+
+    // Advance counter after the task is safely persisted.
+    cfg.next_task_id = nextNumeric + 1;
+    await writeConfig(cfg, cwd);
+    return created;
+  });
 }
 
 // Read a task (returns null on missing/malformed)
@@ -324,6 +357,10 @@ export async function updateTask(
 ): Promise<TeamTask | null> {
   const existing = await readTask(teamName, taskId, cwd);
   if (!existing) return null;
+
+  if (updates.status && !['pending', 'in_progress', 'completed', 'failed'].includes(updates.status)) {
+    throw new Error(`Invalid task status: ${updates.status}`);
+  }
 
   const merged: TeamTask = {
     ...existing,

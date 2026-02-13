@@ -47,7 +47,7 @@ describe('worker bootstrap', () => {
     }
   });
 
-  it("applyWorkerOverlay is idempotent (calling twice doesn't duplicate)", async () => {
+  it('applyWorkerOverlay is idempotent (calling twice doesn\'t duplicate)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-worker-bootstrap-'));
     try {
       const agentsMdPath = join(cwd, 'AGENTS.md');
