@@ -149,6 +149,10 @@ function safeString(value, fallback = '') {
   return String(value);
 }
 
+function isTerminalPhase(phase) {
+  return phase === 'complete' || phase === 'failed' || phase === 'cancelled';
+}
+
 function normalizeInputMessages(payload) {
   const items = payload['input-messages'] || payload.input_messages || [];
   if (!Array.isArray(items)) return [];
@@ -408,6 +412,69 @@ async function handleTmuxInjection({
   }
 }
 
+async function syncLinkedRalphOnTeamTerminalInDir(stateDir, nowIso) {
+  const teamStatePath = join(stateDir, 'team-state.json');
+  const ralphStatePath = join(stateDir, 'ralph-state.json');
+  if (!existsSync(teamStatePath) || !existsSync(ralphStatePath)) return;
+
+  try {
+    const teamState = JSON.parse(await readFile(teamStatePath, 'utf-8'));
+    const ralphState = JSON.parse(await readFile(ralphStatePath, 'utf-8'));
+    const teamPhase = safeString(teamState.current_phase);
+    const linked = teamState.linked_ralph === true && ralphState.linked_team === true;
+    if (!linked || !isTerminalPhase(teamPhase)) return;
+
+    let changed = false;
+    if (ralphState.active !== false) {
+      ralphState.active = false;
+      changed = true;
+    }
+    if (ralphState.current_phase !== teamPhase) {
+      ralphState.current_phase = teamPhase;
+      changed = true;
+    }
+
+    const terminalAt = safeString(teamState.completed_at) || nowIso;
+    if (ralphState.linked_team_terminal_phase !== teamPhase) {
+      ralphState.linked_team_terminal_phase = teamPhase;
+      changed = true;
+    }
+    if (ralphState.linked_team_terminal_at !== terminalAt) {
+      ralphState.linked_team_terminal_at = terminalAt;
+      changed = true;
+    }
+    if (!ralphState.completed_at) {
+      ralphState.completed_at = terminalAt;
+      changed = true;
+    }
+
+    if (changed) {
+      ralphState.last_turn_at = nowIso;
+      await writeFile(ralphStatePath, JSON.stringify(ralphState, null, 2));
+    }
+  } catch {
+    // Non-critical
+  }
+}
+
+async function syncLinkedRalphOnTeamTerminal(stateRootDir, nowIso) {
+  await syncLinkedRalphOnTeamTerminalInDir(stateRootDir, nowIso);
+
+  const sessionsDir = join(stateRootDir, 'sessions');
+  if (!existsSync(sessionsDir)) return;
+
+  try {
+    const entries = await readdir(sessionsDir);
+    for (const sessionId of entries) {
+      // Session IDs are controlled by state-server validation; this check avoids accidental traversal.
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(sessionId)) continue;
+      await syncLinkedRalphOnTeamTerminalInDir(join(sessionsDir, sessionId), nowIso);
+    }
+  } catch {
+    // Non-critical
+  }
+}
+
 async function main() {
   const rawPayload = process.argv[process.argv.length - 1];
   if (!rawPayload || rawPayload.startsWith('-')) {
@@ -462,6 +529,9 @@ async function main() {
   } catch {
     // Non-critical
   }
+
+  // If linked team reaches terminal state, mark linked ralph terminal/inactive too.
+  await syncLinkedRalphOnTeamTerminal(stateDir, new Date().toISOString());
 
   // 3. Track subagent metrics
   const metricsPath = join(omxDir, 'metrics.json');
