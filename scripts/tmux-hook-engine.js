@@ -37,6 +37,7 @@ export function normalizeTmuxHookConfig(raw) {
     && raw.target.value.trim() !== '';
 
   const cooldown = asPositiveInteger(raw.cooldown_ms);
+  const maxPerPane = asPositiveInteger(raw.max_injections_per_pane);
   const maxPerSession = asPositiveInteger(raw.max_injections_per_session);
 
   const marker = typeof raw.marker === 'string' && raw.marker.trim() !== ''
@@ -56,7 +57,10 @@ export function normalizeTmuxHookConfig(raw) {
     target: targetIsValid ? { type: raw.target.type, value: raw.target.value } : null,
     allowed_modes: allowedModes.length > 0 ? allowedModes : DEFAULT_ALLOWED_MODES,
     cooldown_ms: cooldown === null ? 15000 : cooldown,
-    max_injections_per_session: maxPerSession === null || maxPerSession === 0 ? 200 : maxPerSession,
+    // Canonical setting is per-pane. Keep max_injections_per_session as legacy alias.
+    max_injections_per_session: maxPerPane === null
+      ? (maxPerSession === null || maxPerSession === 0 ? 200 : maxPerSession)
+      : (maxPerPane === 0 ? 200 : maxPerPane),
     prompt_template: promptTemplate,
     marker,
     dry_run: raw.dry_run === true,
@@ -84,7 +88,9 @@ export function evaluateInjectionGuards({
   assistantMessage,
   threadId,
   turnId,
+  paneKey,
   sessionKey,
+  skipQuotaChecks,
   now,
   state,
 }) {
@@ -106,16 +112,23 @@ export function evaluateInjectionGuards({
     return { allow: false, reason: 'duplicate_event', dedupeKey };
   }
 
-  const sessions = state.session_counts && typeof state.session_counts === 'object' ? state.session_counts : {};
-  const key = typeof sessionKey === 'string' && sessionKey.trim() !== '' ? sessionKey : 'unknown';
-  const sessionInjections = typeof sessions[key] === 'number' ? sessions[key] : 0;
-  if (sessionInjections >= config.max_injections_per_session) {
-    return { allow: false, reason: 'session_cap_reached', dedupeKey };
-  }
+  if (!skipQuotaChecks) {
+    // Pane is canonical for routing; read legacy session_counts for compatibility.
+    const paneCounts = state.pane_counts && typeof state.pane_counts === 'object' ? state.pane_counts : {};
+    const legacySessionCounts = state.session_counts && typeof state.session_counts === 'object' ? state.session_counts : {};
+    const paneKeyNorm = typeof paneKey === 'string' && paneKey.trim() !== '' ? paneKey : '';
+    const sessionKeyNorm = typeof sessionKey === 'string' && sessionKey.trim() !== '' ? sessionKey : 'unknown';
+    const count = paneKeyNorm && typeof paneCounts[paneKeyNorm] === 'number'
+      ? paneCounts[paneKeyNorm]
+      : (typeof legacySessionCounts[sessionKeyNorm] === 'number' ? legacySessionCounts[sessionKeyNorm] : 0);
+    if (count >= config.max_injections_per_session) {
+      return { allow: false, reason: 'pane_cap_reached', dedupeKey };
+    }
 
-  const lastInjectionTs = typeof state.last_injection_ts === 'number' ? state.last_injection_ts : 0;
-  if (config.cooldown_ms > 0 && lastInjectionTs > 0 && now - lastInjectionTs < config.cooldown_ms) {
-    return { allow: false, reason: 'cooldown_active', dedupeKey };
+    const lastInjectionTs = typeof state.last_injection_ts === 'number' ? state.last_injection_ts : 0;
+    if (config.cooldown_ms > 0 && lastInjectionTs > 0 && now - lastInjectionTs < config.cooldown_ms) {
+      return { allow: false, reason: 'cooldown_active', dedupeKey };
+    }
   }
 
   return { allow: true, reason: 'ok', dedupeKey };
@@ -123,5 +136,14 @@ export function evaluateInjectionGuards({
 
 export function buildSendKeysArgv({ paneTarget, prompt, dryRun }) {
   if (dryRun) return null;
-  return ['send-keys', '-t', paneTarget, prompt, 'Enter'];
+  // Use a 2-step send for reliability:
+  // 1) literal prompt bytes, 2) explicit carriage return.
+  return {
+    typeArgv: ['send-keys', '-t', paneTarget, '-l', prompt],
+    // Some panes/shells swallow one of these key names; send both.
+    submitArgv: [
+      ['send-keys', '-t', paneTarget, 'C-m'],
+      ['send-keys', '-t', paneTarget, 'Enter'],
+    ],
+  };
 }

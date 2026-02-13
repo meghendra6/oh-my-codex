@@ -194,6 +194,29 @@ export function normalizeCodexLaunchArgs(args: string[]): string[] {
   return normalized;
 }
 
+function sanitizeTmuxToken(value: string): string {
+  const cleaned = value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return cleaned || 'unknown';
+}
+
+export function buildTmuxSessionName(cwd: string, sessionId: string): string {
+  const dirToken = sanitizeTmuxToken(basename(cwd));
+  let branchToken = 'detached';
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (branch) branchToken = sanitizeTmuxToken(branch);
+  } catch {
+    // Non-git directory or git unavailable.
+  }
+  const sessionToken = sanitizeTmuxToken(sessionId.replace(/^omx-/, ''));
+  const name = `omx-${dirToken}-${branchToken}-${sessionToken}`;
+  return name.length > 120 ? name.slice(0, 120) : name;
+}
+
 /**
  * preLaunch: Prepare environment before Codex starts.
  * 1. Orphan cleanup (stale session from a crashed launch)
@@ -251,7 +274,8 @@ function runCodex(cwd: string, args: string[]): void {
     }
   } else {
     // Not in tmux: create a new tmux session with codex + HUD pane
-    const sessionName = `omx-${Date.now()}`;
+    const tmuxSessionId = `omx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sessionName = buildTmuxSessionName(cwd, tmuxSessionId);
     const hudCmd = `node ${omxBin} hud --watch`;
     try {
       execSync(

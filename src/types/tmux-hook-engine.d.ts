@@ -36,7 +36,9 @@ declare module '*tmux-hook-engine.js' {
     assistantMessage?: string;
     threadId?: string;
     turnId?: string;
+    paneKey?: string;
     sessionKey?: string;
+    skipQuotaChecks?: boolean;
     now: number;
     state: Record<string, unknown>;
   }): { allow: boolean; reason: string; dedupeKey?: string };
@@ -44,5 +46,5 @@ declare module '*tmux-hook-engine.js' {
     paneTarget: string;
     prompt: string;
     dryRun: boolean;
-  }): string[] | null;
+  }): { typeArgv: string[]; submitArgv: string[][] } | null;
 }

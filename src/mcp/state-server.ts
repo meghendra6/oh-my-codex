@@ -19,6 +19,7 @@ import {
   getStatePath,
   validateSessionId,
 } from './state-paths.js';
+import { withModeRuntimeContext } from '../state/mode-state-context.js';
 
 const SUPPORTED_MODES = [
   'autopilot', 'ultrapilot', 'team', 'pipeline',
@@ -153,7 +154,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         state: customState,
         ...fields
       } = args as Record<string, unknown>;
-      const merged = { ...existing, ...fields, ...(customState as Record<string, unknown> || {}) };
+      const mergedRaw = { ...existing, ...fields, ...(customState as Record<string, unknown> || {}) } as Record<string, unknown>;
+      const merged = withModeRuntimeContext(existing, mergedRaw);
+
       await writeFile(path, JSON.stringify(merged, null, 2));
       return { content: [{ type: 'text', text: JSON.stringify({ success: true, mode, path }) }] };
     }

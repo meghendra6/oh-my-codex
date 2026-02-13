@@ -21,6 +21,7 @@ interface TmuxHookConfig {
 interface TmuxHookState {
   total_injections?: number;
   session_counts?: Record<string, number>;
+  pane_counts?: Record<string, number>;
   last_injection_ts?: number;
   last_reason?: string;
   last_event_at?: string;
@@ -29,7 +30,7 @@ interface TmuxHookState {
 
 const DEFAULT_CONFIG: TmuxHookConfig = {
   enabled: false,
-  target: { type: 'session', value: '' },
+  target: { type: 'pane', value: '' },
   allowed_modes: ['ralph', 'ultrawork', 'team'],
   cooldown_ms: 15000,
   max_injections_per_session: 200,
@@ -206,17 +207,21 @@ async function initTmuxHookConfig(): Promise<void> {
     return;
   }
 
+  const tmuxPane = process.env.TMUX_PANE ? runTmux(['display-message', '-p', '-t', process.env.TMUX_PANE, '#{pane_id}']) : null;
   const tmuxSession = process.env.TMUX_PANE ? runTmux(['display-message', '-p', '-t', process.env.TMUX_PANE, '#S']) : null;
   const initial = {
     ...DEFAULT_CONFIG,
     target: {
-      type: 'session' as const,
-      value: tmuxSession && tmuxSession.ok && tmuxSession.stdout ? tmuxSession.stdout : 'replace-with-tmux-session-name',
+      type: 'pane' as const,
+      value: tmuxPane && tmuxPane.ok && tmuxPane.stdout ? tmuxPane.stdout : 'replace-with-tmux-pane-id',
     },
   };
   await writeFile(configPath, JSON.stringify(initial, null, 2) + '\n');
   console.log(`Created ${configPath}`);
   console.log('Feature remains disabled until you set `"enabled": true`.');
+  if (tmuxSession && tmuxSession.ok && tmuxSession.stdout) {
+    console.log(`Detected tmux session: ${tmuxSession.stdout}`);
+  }
 }
 
 async function showTmuxHookStatus(): Promise<void> {
@@ -240,7 +245,7 @@ async function showTmuxHookStatus(): Promise<void> {
   console.log(`Target: ${config.target.type}:${config.target.value}`);
   console.log(`Allowed Modes: ${config.allowed_modes.join(', ')}`);
   console.log(`Cooldown: ${config.cooldown_ms}ms`);
-  console.log(`Max Injections/Session: ${config.max_injections_per_session}`);
+  console.log(`Max Injections/Pane: ${config.max_injections_per_session}`);
   console.log(`Dry Run: ${config.dry_run ? 'yes' : 'no'}`);
 
   if (!existsSync(statePath)) {
@@ -252,8 +257,12 @@ async function showTmuxHookStatus(): Promise<void> {
     console.log(`Last Reason: ${state.last_reason ?? 'n/a'}`);
     console.log(`Last Event: ${state.last_event_at ?? 'n/a'}`);
     console.log(`Last Target: ${state.last_target ?? 'n/a'}`);
-    const sessions = state.session_counts ? Object.keys(state.session_counts).length : 0;
-    console.log(`Tracked Sessions: ${sessions}`);
+    const panes = state.pane_counts ? Object.keys(state.pane_counts).length : 0;
+    const legacySessions = state.session_counts ? Object.keys(state.session_counts).length : 0;
+    console.log(`Tracked Panes: ${panes}`);
+    if (legacySessions > 0) {
+      console.log(`Tracked Sessions (legacy): ${legacySessions}`);
+    }
   }
 
   console.log(`Log (today): ${existsSync(logPath) ? logPath : 'none yet'}`);

@@ -6,6 +6,7 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
+import { withModeRuntimeContext } from '../state/mode-state-context.js';
 
 export interface ModeState {
   active: boolean;
@@ -64,7 +65,7 @@ export async function startMode(
     }
   }
 
-  const state: ModeState = {
+  const stateBase: ModeState = {
     active: true,
     mode,
     iteration: 0,
@@ -74,6 +75,7 @@ export async function startMode(
     started_at: new Date().toISOString(),
   };
 
+  const state = withModeRuntimeContext({}, stateBase) as ModeState;
   await writeFile(statePath(mode, projectRoot), JSON.stringify(state, null, 2));
   return state;
 }
@@ -102,7 +104,8 @@ export async function updateModeState(
   const current = await readModeState(mode, projectRoot);
   if (!current) throw new Error(`Mode ${mode} not found`);
 
-  const updated = { ...current, ...updates };
+  const updatedBase = { ...current, ...updates };
+  const updated = withModeRuntimeContext(current, updatedBase) as ModeState;
   await writeFile(statePath(mode, projectRoot), JSON.stringify(updated, null, 2));
   return updated;
 }

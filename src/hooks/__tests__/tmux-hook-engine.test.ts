@@ -139,6 +139,7 @@ describe('evaluateInjectionGuards', () => {
       threadId: 'th',
       turnId: 'tu2',
       sessionKey: 'th',
+      paneKey: '%1',
       now: 5500,
       state: { last_injection_ts: 5000, session_counts: { th: 1 } },
     });
@@ -152,12 +153,29 @@ describe('evaluateInjectionGuards', () => {
       assistantMessage: '',
       threadId: 'th',
       turnId: 'tu3',
-      sessionKey: 'th',
+      paneKey: '%1',
       now: 8000,
-      state: { session_counts: { th: 2 }, last_injection_ts: 1000 },
+      state: { pane_counts: { '%1': 2 }, last_injection_ts: 1000 },
     });
     assert.equal(sessionCap.allow, false);
-    assert.equal(sessionCap.reason, 'session_cap_reached');
+    assert.equal(sessionCap.reason, 'pane_cap_reached');
+  });
+
+  it('supports legacy session_counts when pane_counts is absent', () => {
+    const legacyCap = evaluateInjectionGuards({
+      config: validConfig,
+      mode: 'ralph',
+      sourceText: 'legacy',
+      assistantMessage: '',
+      threadId: 'th',
+      turnId: 'legacy-turn',
+      sessionKey: 'th',
+      paneKey: '%legacy',
+      now: 9000,
+      state: { session_counts: { th: 2 }, last_injection_ts: 1000 },
+    });
+    assert.equal(legacyCap.allow, false);
+    assert.equal(legacyCap.reason, 'pane_cap_reached');
   });
 });
 
@@ -167,7 +185,13 @@ describe('buildSendKeysArgv', () => {
       paneTarget: '%3',
       prompt: 'continue',
       dryRun: false,
-    }), ['send-keys', '-t', '%3', 'continue', 'Enter']);
+    }), {
+      typeArgv: ['send-keys', '-t', '%3', '-l', 'continue'],
+      submitArgv: [
+        ['send-keys', '-t', '%3', 'C-m'],
+        ['send-keys', '-t', '%3', 'Enter'],
+      ],
+    });
 
     assert.equal(buildSendKeysArgv({
       paneTarget: '%3',
@@ -176,4 +200,3 @@ describe('buildSendKeysArgv', () => {
     }), null);
   });
 });
-
