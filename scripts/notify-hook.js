@@ -13,6 +13,8 @@
  */
 
 import { writeFile, appendFile, mkdir, readFile } from 'fs/promises';
+import { join } from 'path';
+import { writeFile, appendFile, mkdir, readFile, rename } from 'fs/promises';
 import { join, resolve as resolvePath } from 'path';
 import { existsSync } from 'fs';
 import { spawn } from 'child_process';
@@ -748,6 +750,10 @@ async function main() {
     // Non-critical
   }
 
+  // Team worker detection via environment variable
+  const teamWorkerEnv = process.env.OMX_TEAM_WORKER; // e.g., "fix-ts/worker-1"
+  const isTeamWorker = !!teamWorkerEnv;
+
   // 1. Log the turn
   const logEntry = {
     timestamp: new Date().toISOString(),
@@ -765,27 +771,32 @@ async function main() {
   await appendFile(logFile, JSON.stringify(logEntry) + '\n').catch(() => {});
 
   // 2. Update active mode state (increment iteration)
-  try {
-    const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir);
-    for (const scopedDir of scopedDirs) {
-      const stateFiles = await readdir(scopedDir).catch(() => []);
-      for (const f of stateFiles) {
-        if (!f.endsWith('-state.json')) continue;
-        const statePath = join(scopedDir, f);
-        const state = JSON.parse(await readFile(statePath, 'utf-8'));
-        if (state.active) {
-          state.iteration = (state.iteration || 0) + 1;
-          state.last_turn_at = new Date().toISOString();
-          await writeFile(statePath, JSON.stringify(state, null, 2));
+  // GUARD: Skip when running inside a team worker to prevent state corruption
+  if (!isTeamWorker) {
+    try {
+      const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir);
+      for (const scopedDir of scopedDirs) {
+        const stateFiles = await readdir(scopedDir).catch(() => []);
+        for (const f of stateFiles) {
+          if (!f.endsWith('-state.json')) continue;
+          const statePath = join(scopedDir, f);
+          const state = JSON.parse(await readFile(statePath, 'utf-8'));
+          if (state.active) {
+            state.iteration = (state.iteration || 0) + 1;
+            state.last_turn_at = new Date().toISOString();
+            await writeFile(statePath, JSON.stringify(state, null, 2));
+          }
         }
       }
+    } catch {
+      // Non-critical
     }
-  } catch {
-    // Non-critical
   }
 
   // If linked team reaches terminal state, mark linked ralph terminal/inactive too.
-  await syncLinkedRalphOnTeamTerminal(stateDir, new Date().toISOString());
+  if (!isTeamWorker) {
+    await syncLinkedRalphOnTeamTerminal(stateDir, new Date().toISOString());
+  }
 
   // 3. Track subagent metrics
   const metricsPath = join(omxDir, 'metrics.json');
@@ -863,11 +874,42 @@ async function main() {
     // Non-critical
   }
 
+  // 4.5. Update team worker heartbeat (if applicable)
+  if (isTeamWorker) {
+    try {
+      const parts = teamWorkerEnv.split('/');
+      if (parts.length === 2) {
+        const [twTeamName, twWorkerName] = parts;
+        const heartbeatPath = join(stateDir, 'team', twTeamName, 'workers', twWorkerName, 'heartbeat.json');
+        let turnCount = 0;
+        try {
+          const existing = JSON.parse(await readFile(heartbeatPath, 'utf-8'));
+          turnCount = existing.turn_count || 0;
+        } catch { /* first heartbeat or malformed */ }
+        const heartbeat = {
+          pid: process.ppid || process.pid,
+          last_turn_at: new Date().toISOString(),
+          turn_count: turnCount + 1,
+          alive: true,
+        };
+        // Atomic write: tmp + rename
+        const tmpPath = heartbeatPath + '.tmp.' + process.pid;
+        await writeFile(tmpPath, JSON.stringify(heartbeat, null, 2));
+        await rename(tmpPath, heartbeatPath);
+      }
+    } catch {
+      // Non-critical: heartbeat write failure should never block the hook
+    }
+  }
+
   // 5. Optional tmux prompt injection workaround (non-fatal, opt-in)
-  try {
-    await handleTmuxInjection({ payload, cwd, stateDir, logsDir });
-  } catch {
-    // Non-critical
+  // Skip for team workers - only the lead should inject prompts
+  if (!isTeamWorker) {
+    try {
+      await handleTmuxInjection({ payload, cwd, stateDir, logsDir });
+    } catch {
+      // Non-critical
+    }
   }
 }
 
