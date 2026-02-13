@@ -1,8 +1,8 @@
 ---
-name: hud
-description: Show or configure the OMX HUD (two-layer statusline)
-role: display
-scope: .omx/**
+name: "hud"
+description: "Show or configure the OMX HUD (two-layer statusline)"
+role: "display"
+scope: ".omx/**"
 ---
 
 # HUD Skill
@@ -46,6 +46,7 @@ The OMX HUD uses a two-layer architecture:
 `omx setup` automatically configures both layers:
 - Adds `[tui] status_line` to `~/.codex/config.toml` (Layer 1)
 - Writes `.omx/hud-config.json` with default preset (Layer 2)
+- Default preset is `focused`; if HUD/statusline changes do not appear, restart Codex CLI once.
 
 ## Layer 1: Codex Built-in StatusLine
 

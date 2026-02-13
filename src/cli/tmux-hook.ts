@@ -28,6 +28,18 @@ interface TmuxHookState {
   last_target?: string;
 }
 
+interface InitialTargetDetection {
+  target: { type: TmuxTargetType; value: string };
+  sessionName?: string;
+}
+
+interface InitConfigResult {
+  configPath: string;
+  created: boolean;
+  usedPlaceholderTarget: boolean;
+  detectedSession?: string;
+}
+
 const DEFAULT_CONFIG: TmuxHookConfig = {
   enabled: true,
   target: { type: 'pane', value: '' },
@@ -161,6 +173,32 @@ async function readValidatedConfig(cwd = process.cwd()): Promise<TmuxHookConfig>
   return parseConfig(JSON.parse(content));
 }
 
+async function loadConfigForCommand(
+  commandName: 'status' | 'validate' | 'test',
+  cwd = process.cwd(),
+): Promise<{ config: TmuxHookConfig; initResult: InitConfigResult | null }> {
+  const configPath = tmuxHookConfigPath(cwd);
+  let initResult: InitConfigResult | null = null;
+
+  if (!existsSync(configPath)) {
+    initResult = await initTmuxHookConfig({ silent: true, cwd });
+    if (initResult.created) {
+      console.log(`No tmux-hook config found. Created ${initResult.configPath}.`);
+      if (initResult.detectedSession) {
+        console.log(`Detected tmux session: ${initResult.detectedSession}`);
+      }
+      if (initResult.usedPlaceholderTarget) {
+        console.log('Could not auto-detect a tmux target. Edit `.omx/tmux-hook.json` when ready.');
+        if (commandName === 'validate') {
+          console.log('Validation skipped until `target.value` is configured.');
+        }
+      }
+    }
+  }
+
+  return { config: await readValidatedConfig(cwd), initResult };
+}
+
 function runTmux(args: string[]): { ok: true; stdout: string } | { ok: false; stderr: string } {
   const result = spawnSync('tmux', args, { encoding: 'utf-8' });
   if (result.error) {
@@ -197,52 +235,138 @@ function resolveValidateTarget(config: TmuxHookConfig): { ok: true; target: stri
   return { ok: true, target: paneId };
 }
 
-async function initTmuxHookConfig(): Promise<void> {
-  const cwd = process.cwd();
+function detectActivePaneFromList(): InitialTargetDetection | null {
+  const paneList = runTmux(['list-panes', '-a', '-F', '#{pane_id}\t#{pane_active}\t#{session_name}']);
+  if (!paneList.ok || paneList.stdout.trim() === '') return null;
+
+  const rows = paneList.stdout
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => line.split('\t'))
+    .filter(parts => parts.length >= 3);
+  if (rows.length === 0) return null;
+
+  const active = rows.find(parts => parts[1] === '1') || rows[0];
+  const paneId = (active?.[0] || '').trim();
+  const sessionName = (active?.[2] || '').trim();
+  if (!paneId) return null;
+
+  return {
+    target: { type: 'pane', value: paneId },
+    sessionName: sessionName || undefined,
+  };
+}
+
+function detectInitialTarget(): InitialTargetDetection | null {
+  const tmuxPaneEnv = process.env.TMUX_PANE;
+  if (tmuxPaneEnv) {
+    const pane = runTmux(['display-message', '-p', '-t', tmuxPaneEnv, '#{pane_id}']);
+    if (pane.ok && pane.stdout) {
+      const session = runTmux(['display-message', '-p', '-t', tmuxPaneEnv, '#S']);
+      return {
+        target: { type: 'pane', value: pane.stdout },
+        sessionName: session.ok && session.stdout ? session.stdout : undefined,
+      };
+    }
+  }
+
+  const currentClientPane = runTmux(['display-message', '-p', '#{pane_id}']);
+  if (currentClientPane.ok && currentClientPane.stdout) {
+    const session = runTmux(['display-message', '-p', '#S']);
+    return {
+      target: { type: 'pane', value: currentClientPane.stdout },
+      sessionName: session.ok && session.stdout ? session.stdout : undefined,
+    };
+  }
+
+  const activePane = detectActivePaneFromList();
+  if (activePane) return activePane;
+
+  const sessions = runTmux(['list-sessions', '-F', '#{session_name}']);
+  if (sessions.ok && sessions.stdout.trim() !== '') {
+    const firstSession = sessions.stdout
+      .split('\n')
+      .map(line => line.trim())
+      .find(Boolean);
+    if (firstSession) {
+      return {
+        target: { type: 'session', value: firstSession },
+        sessionName: firstSession,
+      };
+    }
+  }
+
+  return null;
+}
+
+async function initTmuxHookConfig(opts?: { silent?: boolean; cwd?: string }): Promise<InitConfigResult> {
+  const cwd = opts?.cwd ?? process.cwd();
+  const silent = opts?.silent ?? false;
   const configPath = tmuxHookConfigPath(cwd);
   await mkdir(omxDir(cwd), { recursive: true });
 
   if (existsSync(configPath)) {
-    console.log(`tmux-hook config already exists: ${configPath}`);
-    return;
+    if (!silent) {
+      console.log(`tmux-hook config already exists: ${configPath}`);
+    }
+    return { configPath, created: false, usedPlaceholderTarget: false };
   }
 
-  const tmuxPane = process.env.TMUX_PANE ? runTmux(['display-message', '-p', '-t', process.env.TMUX_PANE, '#{pane_id}']) : null;
-  const tmuxSession = process.env.TMUX_PANE ? runTmux(['display-message', '-p', '-t', process.env.TMUX_PANE, '#S']) : null;
+  const detected = detectInitialTarget();
   const initial = {
     ...DEFAULT_CONFIG,
-    target: {
-      type: 'pane' as const,
-      value: tmuxPane && tmuxPane.ok && tmuxPane.stdout ? tmuxPane.stdout : 'replace-with-tmux-pane-id',
-    },
+    target: detected?.target ?? { type: 'pane' as const, value: 'replace-with-tmux-pane-id' },
   };
   await writeFile(configPath, JSON.stringify(initial, null, 2) + '\n');
-  console.log(`Created ${configPath}`);
-  console.log('Feature is enabled by default (`"enabled": true`).');
-  if (tmuxSession && tmuxSession.ok && tmuxSession.stdout) {
-    console.log(`Detected tmux session: ${tmuxSession.stdout}`);
+
+  const result: InitConfigResult = {
+    configPath,
+    created: true,
+    usedPlaceholderTarget: !detected,
+    detectedSession: detected?.sessionName,
+  };
+
+  if (!silent) {
+    console.log(`Created ${configPath}`);
+    console.log('Feature is enabled by default (`"enabled": true`).');
+    if (detected) {
+      console.log(`Detected target: ${detected.target.type}:${detected.target.value}`);
+    }
+    if (detected?.sessionName) {
+      console.log(`Detected tmux session: ${detected.sessionName}`);
+    }
+    if (!detected) {
+      console.log('No running tmux target detected. Update `target.value` when ready.');
+    }
+  }
+
+  return result;
+}
+
+export async function ensureTmuxHookInitialized(cwd = process.cwd()): Promise<void> {
+  try {
+    await initTmuxHookConfig({ silent: true, cwd });
+  } catch {
+    // Best-effort only: state tools must remain available even without tmux.
   }
 }
 
 async function showTmuxHookStatus(): Promise<void> {
   const cwd = process.cwd();
-  const configPath = tmuxHookConfigPath(cwd);
   const statePath = tmuxHookStatePath(cwd);
   const logPath = tmuxHookLogPath(cwd);
 
   console.log('tmux-hook status');
   console.log('----------------');
-
-  if (!existsSync(configPath)) {
-    console.log(`Config: missing (${configPath})`);
-    console.log('Run: omx tmux-hook init');
-    return;
-  }
-
-  const config = await readValidatedConfig(cwd);
+  const { config, initResult } = await loadConfigForCommand('status', cwd);
+  const configPath = tmuxHookConfigPath(cwd);
   console.log(`Config: ${configPath}`);
   console.log(`Enabled: ${config.enabled ? 'yes' : 'no'}`);
   console.log(`Target: ${config.target.type}:${config.target.value}`);
+  if (initResult?.usedPlaceholderTarget) {
+    console.log('Target Status: placeholder (set `target.value` to enable injection)');
+  }
   console.log(`Allowed Modes: ${config.allowed_modes.join(', ')}`);
   console.log(`Cooldown: ${config.cooldown_ms}ms`);
   console.log(`Max Injections/Pane: ${config.max_injections_per_session}`);
@@ -270,7 +394,10 @@ async function showTmuxHookStatus(): Promise<void> {
 
 async function validateTmuxHookConfig(): Promise<void> {
   const cwd = process.cwd();
-  const config = await readValidatedConfig(cwd);
+  const { config, initResult } = await loadConfigForCommand('validate', cwd);
+  if (initResult?.usedPlaceholderTarget) {
+    return;
+  }
   const resolved = resolveValidateTarget(config);
 
   if (!resolved.ok) {
@@ -287,6 +414,10 @@ async function validateTmuxHookConfig(): Promise<void> {
 
 async function testTmuxHook(args: string[]): Promise<void> {
   const cwd = process.cwd();
+  const { initResult } = await loadConfigForCommand('test', cwd);
+  if (initResult?.usedPlaceholderTarget) {
+    console.log('Proceeding with placeholder target; notify-hook may log `invalid_config` skips.');
+  }
   const pkgRoot = getPackageRoot();
   const notifyHook = join(pkgRoot, 'scripts', 'notify-hook.js');
   if (!existsSync(notifyHook)) {

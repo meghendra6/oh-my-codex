@@ -20,6 +20,7 @@ import {
   validateSessionId,
 } from './state-paths.js';
 import { withModeRuntimeContext } from '../state/mode-state-context.js';
+import { ensureTmuxHookInitialized } from '../cli/tmux-hook.js';
 
 const SUPPORTED_MODES = [
   'autopilot', 'ultrapilot', 'team', 'pipeline',
@@ -27,6 +28,13 @@ const SUPPORTED_MODES = [
 ] as const;
 
 type Mode = typeof SUPPORTED_MODES[number];
+const STATE_TOOL_NAMES = new Set([
+  'state_read',
+  'state_write',
+  'state_clear',
+  'state_list_active',
+  'state_get_status',
+]);
 
 const server = new Server(
   { name: 'omx-state', version: '0.1.0' },
@@ -110,7 +118,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+export async function handleStateToolCall(request: {
+  params: { name: string; arguments?: Record<string, unknown> };
+}) {
   const { name, arguments: args } = request.params;
   const wd = (args as Record<string, unknown>)?.workingDirectory as string | undefined;
   let sessionId: string | undefined;
@@ -121,6 +131,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
       isError: true,
     };
+  }
+
+  if (STATE_TOOL_NAMES.has(name)) {
+    await mkdir(getStateDir(wd, sessionId), { recursive: true });
+    await ensureTmuxHookInitialized(wd || process.cwd());
   }
 
   switch (name) {
@@ -136,8 +151,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     case 'state_write': {
       const mode = (args as Record<string, unknown>).mode as string;
-      const stateDir = getStateDir(wd, sessionId);
-      await mkdir(stateDir, { recursive: true });
       const path = getStatePath(mode, wd, sessionId);
 
       let existing: Record<string, unknown> = {};
@@ -241,8 +254,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     default:
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
   }
-});
+}
+server.setRequestHandler(CallToolRequestSchema, handleStateToolCall);
 
 // Start server
-const transport = new StdioServerTransport();
-server.connect(transport).catch(console.error);
+if (process.env.OMX_STATE_SERVER_DISABLE_AUTO_START !== '1') {
+  const transport = new StdioServerTransport();
+  server.connect(transport).catch(console.error);
+}
