@@ -201,6 +201,8 @@ The AGENTS.md orchestration brain detects keywords and activates skills automati
 ## CLI Commands
 
 ```bash
+omx --yolo    # Launch Codex with low-friction execution flags
+omx --madmax  # Launch Codex with full approval+sandbox bypass (dangerous)
 omx setup     # Install and configure OMX
 omx doctor    # Run 9 installation health checks
 omx tmux-hook # Manage tmux prompt-injection workaround (init/status/validate)
@@ -210,6 +212,16 @@ omx hud       # Show HUD statusline (--watch, --json, --preset=NAME)
 omx version   # Print version info
 omx help      # Usage guide
 ```
+
+## Launch Options
+
+- `--yolo`
+  Launch shorthand for `omx launch --yolo`.
+
+- `--madmax`
+  Launches Codex with `--dangerously-bypass-approvals-and-sandbox` (native Codex flag).
+  This bypasses approval prompts and sandboxing.
+  Use only in externally sandboxed/trusted environments.
 
 ## Tmux Injection Workaround (Opt-In)
 
