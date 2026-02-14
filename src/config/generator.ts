@@ -14,18 +14,21 @@ interface MergeOptions {
 function selectNotifyFormat(): 'string' | 'array' {
   const forced = (process.env.OMX_NOTIFY_FORMAT || '').trim().toLowerCase();
   if (forced === 'string' || forced === 'array') return forced;
-  // Default to string for compatibility with environments expecting TOML string.
-  // Array format is available with OMX_NOTIFY_FORMAT=array.
-  return 'string';
+  // Default to array to match Codex schema (notify expects a sequence).
+  // String format is available with OMX_NOTIFY_FORMAT=string for legacy environments.
+  return 'array';
 }
 
 function getNotifyConfigLine(notifyHookPath: string): string {
   const format = selectNotifyFormat();
+  const escapedNotifyHookPath = notifyHookPath
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
   const notifyCommand = `node "${notifyHookPath}"`
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"');
   if (format === 'array') {
-    return `notify = ["node", "${notifyHookPath}"]`;
+    return `notify = ["node", "${escapedNotifyHookPath}"]`;
   }
   return `notify = "${notifyCommand}"`;
 }

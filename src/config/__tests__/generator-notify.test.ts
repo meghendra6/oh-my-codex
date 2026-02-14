@@ -6,9 +6,25 @@ import { join } from 'node:path';
 import { mergeConfig } from '../generator.js';
 
 describe('config generator notify', () => {
-  it('writes notify as a TOML string (not an array)', async () => {
+  it('writes notify as a TOML array by default (Codex expects a sequence)', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-config-gen-'));
     try {
+      const configPath = join(wd, 'config.toml');
+      await mergeConfig(configPath, wd);
+      const toml = await readFile(configPath, 'utf-8');
+
+      assert.match(toml, /^notify = \["node", ".*notify-hook\.js"\]$/m);
+      assert.doesNotMatch(toml, /^notify = ".*"$/m);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('writes notify as string when OMX_NOTIFY_FORMAT=string', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-config-gen-'));
+    const prev = process.env.OMX_NOTIFY_FORMAT;
+    try {
+      process.env.OMX_NOTIFY_FORMAT = 'string';
       const configPath = join(wd, 'config.toml');
       await mergeConfig(configPath, wd);
       const toml = await readFile(configPath, 'utf-8');
@@ -17,13 +33,17 @@ describe('config generator notify', () => {
       assert.doesNotMatch(toml, /^notify = \[/m);
       assert.match(toml, /notify = "node /);
     } finally {
+      if (prev === undefined) {
+        delete process.env.OMX_NOTIFY_FORMAT;
+      } else {
+        process.env.OMX_NOTIFY_FORMAT = prev;
+      }
       await rm(wd, { recursive: true, force: true });
     }
   });
 
-  it('quotes notify hook path so spaces are preserved', async () => {
+  it('handles paths with spaces in array format', async () => {
     const base = await mkdtemp(join(tmpdir(), 'omx config gen space-'));
-    // Add a space in the pkgRoot path itself.
     const wd = join(base, 'pkg root');
     try {
       await mkdir(wd, { recursive: true });
@@ -31,15 +51,30 @@ describe('config generator notify', () => {
       await mergeConfig(configPath, wd);
       const toml = await readFile(configPath, 'utf-8');
 
-      const m = toml.match(/^notify = "(.*)"$/m);
-      assert.ok(m, 'notify string not found');
+      const m = toml.match(/^notify = \["node", "(.*)"\]$/m);
+      assert.ok(m, 'notify array not found');
+      assert.match(m[1], /pkg root/);
+      assert.match(m[1], /notify-hook\.js$/);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
 
-      const notify = m[1];
-      assert.match(notify, /^node /);
-      // The path part should be quoted inside the command string.
-      assert.ok(notify.startsWith('node \\"'));
-      assert.ok(notify.endsWith('notify-hook.js\\"'));
-      assert.match(notify, /pkg root/);
+  it('escapes backslashes in array format for Windows-style paths', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'omx-config-gen-win-'));
+    const wd = join(base, 'C:\\Users\\alice\\pkg');
+    try {
+      await mkdir(wd, { recursive: true });
+      const configPath = join(wd, 'config.toml');
+      await mergeConfig(configPath, wd);
+      const toml = await readFile(configPath, 'utf-8');
+
+      const m = toml.match(/^notify = \["node", "(.*)"\]$/m);
+      assert.ok(m, 'notify array not found');
+      assert.ok(
+        m[1].includes('C:\\\\Users\\\\alice\\\\pkg'),
+        `expected escaped Windows path, got: ${m[1]}`
+      );
     } finally {
       await rm(base, { recursive: true, force: true });
     }
