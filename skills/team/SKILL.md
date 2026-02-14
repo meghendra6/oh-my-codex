@@ -5,205 +5,254 @@ description: N coordinated agents on shared task list using tmux-based orchestra
 
 # Team Skill
 
-Spawn N coordinated Codex CLI sessions as worker agents in tmux split panes, working on a shared task list. Communication uses native MCP-backed state/mailbox APIs with tmux used only as transport/notification.
+`$team` is the tmux-based parallel execution mode for OMX. It starts real worker Codex sessions in split panes and coordinates them through `.omx/state/team/...` files plus MCP team tools.
 
-## Usage
+This skill is operationally sensitive. Treat it as an operator workflow, not a generic prompt pattern.
 
-```
-$team N:agent-type "task description"
-$team "task description"
-$team ralph "task description"
-```
+## What This Skill Must Do
 
-### Parameters
+When user triggers `$team`, the agent must:
 
-- **N** - Number of worker agents (1-6, configurable up to 20). Optional; defaults to auto-sizing based on task decomposition.
-- **agent-type** - Worker role for the `team-exec` stage (e.g., executor, build-fixer, designer). Optional; defaults to executor.
-- **task** - High-level task to decompose and distribute among workers.
-- **ralph** - Optional modifier. Wraps the team pipeline in Ralph's persistence loop.
+1. Invoke OMX runtime directly with `omx team ...`
+2. Avoid replacing the flow with in-process `spawn_agent` fanout
+3. Verify startup and surface concrete state/pane evidence
+4. Keep team state alive until workers are terminal (unless explicit abort)
+5. Handle cleanup and stale-pane recovery when needed
 
-### Examples
+If `omx team` is unavailable, stop with a hard error.
 
-```bash
-$team 3:executor "fix all TypeScript errors across the project"
-$team 4:build-fixer "fix build errors in src/"
-$team "refactor the auth module"
-$team ralph "build a complete REST API for user management"
-```
-
-## Architecture
-
-```
-User: "$team 3:executor fix all TypeScript errors"
-           |
-           v
-   [LEAD CODEX SESSION]
-           |
-           +-- 1. Parse input (N=3, type=executor, task=...)
-           |
-           +-- 2. Analyze & decompose (explore/architect via spawn_agent)
-           |       -> produces task list with file-scoped assignments
-           |
-           +-- 3. Create team state
-           |       -> state_write(mode="team", phase="team-plan", ...)
-           |       -> initTeamState(.omx/state/team/{name}/)
-           |
-           +-- 4. Split the current tmux window into worker panes
-           |       -> leader stays in the current pane (no new Codex session)
-           |       -> worker panes launch Codex with env: OMX_TEAM_WORKER={name}/worker-<n>
-           |
-           +-- 5. Wait for worker readiness (poll tmux capture-pane)
-           |
-           +-- 6. Bootstrap workers via file-based inbox
-           |       -> Write prompt to .omx/state/team/{name}/workers/{id}/inbox.md
-           |       -> send-keys trigger: "Read and follow instructions in ..."
-           |
-           +-- 7. Monitor loop (poll state files)
-           |       <- heartbeat.json (auto-updated by notify hook)
-           |       <- tasks/{id}.json (updated by workers)
-           |       -> Detect completion, failure, death
-           |       -> Reassign via new inbox + trigger
-           |
-           +-- 8. Shutdown
-                   -> send shutdown inbox + trigger
-                   -> kill only created worker panes (leader keeps current session)
-                   -> state_clear(mode="team")
-```
-
-## Communication Protocol
-
-### Lead -> Worker (File-Based Inbox)
-
-The lead NEVER sends large prompts via tmux send-keys. Instead:
-
-1. Write the full prompt to `.omx/state/team/{name}/workers/{id}/inbox.md`
-2. Send a short trigger (<200 chars) via `tmux send-keys`: "Read and follow the instructions in .omx/state/team/{name}/workers/{id}/inbox.md"
-3. Worker reads the inbox file and executes
-
-### Worker -> Lead (MCP Mailbox + State Files)
-
-Workers communicate by writing JSON state files:
-
-- **Task status**: `.omx/state/team/{name}/tasks/task-{id}.json` (status, result, error)
-- **Worker status**: `.omx/state/team/{name}/workers/{id}/status.json` (idle/working/blocked/done/failed)
-- **Heartbeat** (automatic): `.omx/state/team/{name}/workers/{id}/heartbeat.json` (updated by notify hook after each turn)
-- **Direct message to lead (MCP tool)**: `team_send_message` (to `leader-fixed`) writes `.omx/state/team/{name}/mailbox/leader-fixed.json`
-- **Worker broadcast (MCP tool)**: `team_broadcast` sends mailbox messages to other workers
-- **Mailbox read (MCP tool)**: `team_mailbox_list`
-- **Mailbox delivery ack (MCP tool)**: `team_mailbox_mark_delivered`
-
-### Required Worker Bootstrap
-
-On initialization, workers must:
-1. Load `skills/worker/SKILL.md`
-2. Send a startup ACK message to `leader-fixed`
-3. Then begin assigned tasks
-
-### Worker Identity
-
-Each worker knows its identity via the `OMX_TEAM_WORKER` environment variable, set when the tmux pane is created:
+## Invocation Contract
 
 ```bash
-tmux split-window -t {leader-pane} -d -c {cwd} "env OMX_TEAM_WORKER={team}/worker-1 codex"
+omx team [ralph] [N:agent-type] "<task description>"
 ```
 
-The notify hook reads this to:
-1. Update the worker's heartbeat file automatically
-2. Skip global mode state iteration (prevents state corruption)
-3. Skip tmux prompt injection (only the lead injects)
+Examples:
 
-## State File Layout
-
-```
-.omx/state/team/{team-name}/
-  config.json                      # Team metadata
-  workers/
-    worker-1/
-      heartbeat.json               # Auto-updated by notify hook
-      status.json                  # Written by worker
-      identity.json                # Written at bootstrap
-      inbox.md                     # Written by lead (current instructions)
-    worker-2/
-      ...
-  tasks/
-    task-1.json                    # {id, subject, description, status, owner, result, error, blocked_by}
-    task-2.json
-    ...
+```bash
+omx team 3:executor "analyze feature X and report flaws"
+omx team "debug flaky integration tests"
+omx team ralph "ship end-to-end fix with verification"
 ```
 
-## Staged Pipeline
+## Preconditions
 
-The team follows the canonical 5-stage pipeline from `src/team/orchestrator.ts`:
+Before running `$team`, confirm:
 
-| Stage | Purpose | Agents |
-|-------|---------|--------|
-| team-plan | Analyze & decompose | explore (haiku), planner (opus) |
-| team-prd | Extract requirements | analyst (opus), product-manager |
-| team-exec | Execute subtasks | executor (sonnet), or task-specific |
-| team-verify | Validate quality | verifier (sonnet), reviewers |
-| team-fix | Fix defects (loop) | executor, build-fixer, debugger |
+1. `tmux` installed (`tmux -V`)
+2. Current leader session is inside tmux (`$TMUX` is set)
+3. `omx` command resolves to the intended install/build
+4. If running repo-local `node bin/omx.js ...`, run `npm run build` after `src` changes
+5. Check HUD pane count in the leader window and avoid duplicate `hud --watch` panes before split
 
-Terminal states: `complete`, `failed`, `cancelled`.
+Suggested preflight:
 
-## Worker Protocol
+```bash
+tmux list-panes -F '#{pane_id}\t#{pane_start_command}' | rg 'hud --watch' || true
+```
 
-Workers follow this protocol (injected via AGENTS.md overlay + inbox):
+If duplicates exist, remove extras before `omx team` to prevent HUD ending up in worker stack.
 
-1. Read inbox file at the path sent via terminal
-2. Read task file at `.omx/state/team/{name}/tasks/task-{id}.json`
-3. Write `{"status": "in_progress"}` to the task file
-4. Do the work
-5. Write `{"status": "completed", "result": "summary"}` to the task file
-6. Write `{"state": "idle"}` to status file
-7. Wait for new instructions
+## Current Runtime Behavior (As Implemented)
 
-### Worker Rules
+`omx team` currently performs:
 
-- Do NOT edit files outside the paths listed in your task
-- If you need to modify a shared file, write `{"state": "blocked", "reason": "..."}` and wait
-- ALWAYS write results to the task file before reporting done
+1. Parse args (`ralph`, `N`, `agent-type`, task)
+2. Sanitize team name from task text
+3. Initialize team state:
+   - `.omx/state/team/<team>/config.json`
+   - `.omx/state/team/<team>/manifest.v2.json`
+   - `.omx/state/team/<team>/tasks/task-<id>.json`
+4. Apply worker overlay to project `AGENTS.md`
+5. Split current tmux window into worker panes
+6. Launch workers with `OMX_TEAM_WORKER=<team>/worker-<n>`
+7. Wait for worker readiness (`capture-pane` polling)
+8. Write per-worker `inbox.md` and trigger via `tmux send-keys`
+9. Return control to leader; follow-up uses `status` / `resume` / `shutdown`
 
-## Monitoring & Progress Detection
+Important:
 
-The lead monitors via `monitorTeam()` which reads all state files and returns a `TeamSnapshot`:
+- Leader remains in existing pane
+- Worker panes are independent full Codex sessions
+- Worker ACKs go to `mailbox/leader-fixed.json`
+- Notify hook updates worker heartbeat and nudges leader during active team mode
 
-- **Task counts**: total, pending, in_progress, completed, failed
-- **Worker liveness**: PID-based detection via tmux pane PID
-- **Dead workers**: Workers whose tmux pane PIDs are gone
-- **Non-reporting workers**: Active heartbeat but stale task status (>5 turns)
-- **Recommendations**: "Reassign task-3 from dead worker-2", "Send reminder to non-reporting worker-1"
+## Required Lifecycle (Operator Contract)
 
-## Error Recovery
+Follow this exact lifecycle when running `$team`:
 
-- **Dead worker**: Detected via PID monitoring. Lead reassigns their in-progress tasks to alive workers.
-- **Non-reporting worker**: Detected by cross-referencing heartbeat turns with task updates. Lead sends reminder via inbox.
-- **All workers dead**: Lead reports failure and cleans up.
-- **Task failure**: Worker writes `{"status": "failed", "error": "reason"}`. Lead decides whether to reassign or transition to team-fix phase.
+1. Start team and verify startup evidence (team line, tmux target, panes, ACK mailbox)
+2. Monitor task and worker progress (`omx team status <team>`)
+3. Wait for terminal task state before shutdown:
+   - `pending=0`
+   - `in_progress=0`
+   - `failed=0` (or explicitly acknowledged failure path)
+4. Only then run `omx team shutdown <team>`
+5. Verify shutdown evidence and state cleanup
 
-## Shutdown Protocol
+Do not run `shutdown` while workers are actively writing updates unless user explicitly requested abort/cancel.
 
-1. Write shutdown inbox to each worker with exit instructions
-2. Send short trigger via send-keys
-3. Wait up to 15 seconds for workers to exit
-4. Force kill remaining workers via tmux kill-pane
-5. Strip AGENTS.md overlay
-6. Clean up state: `rm -rf .omx/state/team/{name}/`
-7. Clear mode state: `state_clear(mode="team")`
+## Operational Commands
 
-## Team + Ralph Composition
+```bash
+omx team status <team-name>
+omx team resume <team-name>
+omx team shutdown <team-name>
+```
 
-When invoked with `ralph` modifier, both modes activate:
-- Team state has `linked_ralph: true`
-- Ralph state has `linked_team: true`
-- Ralph wraps the team pipeline with persistence and architect verification
-- Coordinated cancellation: cancel team first, then ralph
+Semantics:
 
-## Requirements
+- `status`: reads team snapshot (task counts, dead/non-reporting workers)
+- `resume`: reconnects to live team session if present
+- `shutdown`: graceful shutdown request, then cleanup (deletes `.omx/state/team/<team>`)
 
-- **tmux** must be installed (`apt install tmux` / `brew install tmux`)
-- Team mode fails fast with a clear error if tmux is not available
-- Maximum 6 workers by default (configurable up to 20 via `.omx-config.json`)
+## Data Plane and Control Plane
 
-## V1 Limitations
+### Control Plane
 
-- **No git worktree isolation**: Workers share the project directory. File conflicts are mitigated by scoping tasks to non-overlapping file sets and explicit worker rules. Git worktree isolation is planned for V2.
+- tmux panes/processes (`OMX_TEAM_WORKER` per worker)
+- leader notifications via `tmux display-message`
+
+### Data Plane
+
+- `.omx/state/team/<team>/...` files
+- Team mailbox files:
+  - `.omx/state/team/<team>/mailbox/leader-fixed.json`
+  - `.omx/state/team/<team>/mailbox/worker-<n>.json`
+
+### Key Files
+
+- `.omx/state/team/<team>/config.json`
+- `.omx/state/team/<team>/manifest.v2.json`
+- `.omx/state/team/<team>/tasks/task-<id>.json`
+- `.omx/state/team/<team>/workers/worker-<n>/identity.json`
+- `.omx/state/team/<team>/workers/worker-<n>/inbox.md`
+- `.omx/state/team/<team>/workers/worker-<n>/heartbeat.json`
+- `.omx/state/team/<team>/workers/worker-<n>/status.json`
+- `.omx/state/team-leader-nudge.json`
+
+## Team + Worker Protocol Notes
+
+Leader-to-worker:
+
+- Write full assignment to worker `inbox.md`
+- Send short trigger (<200 chars) with `tmux send-keys`
+
+Worker-to-leader:
+
+- Send ACK to `leader-fixed` mailbox via `team_send_message`
+- Claim task via state API, execute, update task + status
+
+Task ID rule (critical):
+
+- File path uses `task-<id>.json` (example `task-1.json`)
+- MCP API `task_id` uses bare id (example `"1"`, not `"task-1"`)
+
+## Environment Knobs
+
+Useful runtime env vars:
+
+- `OMX_TEAM_READY_TIMEOUT_MS`
+  - Worker readiness timeout (default 45000)
+- `OMX_TEAM_SKIP_READY_WAIT=1`
+  - Skip readiness wait (debug only)
+- `OMX_TEAM_AUTO_TRUST=0`
+  - Disable auto-advance for trust prompt (default behavior auto-advances)
+- `OMX_TEAM_WORKER_LAUNCH_ARGS`
+  - Extra args passed to worker `codex` launch
+- `OMX_TEAM_LEADER_NUDGE_MS`
+  - Leader nudge interval in ms (default 120000)
+- `OMX_TEAM_STRICT_SUBMIT=1`
+  - Force strict send-keys submit failure behavior
+
+## Failure Modes and Diagnosis
+
+### `worker_notify_failed:<worker>`
+
+Meaning:
+- Leader wrote inbox but trigger submit path failed
+
+Checks:
+
+1. `tmux list-panes -F '#{pane_id}\t#{pane_start_command}'`
+2. `tmux capture-pane -t %<worker-pane> -p -S -120`
+3. Verify worker process alive and not stuck on trust prompt
+4. Rebuild if running repo-local (`npm run build`)
+
+### Team starts but leader gets no ACK
+
+Checks:
+
+1. Worker pane capture shows inbox processing
+2. `.omx/state/team/<team>/mailbox/leader-fixed.json` exists
+3. Worker skill loaded and `team_send_message` called
+4. Task-id mismatch not blocking worker flow
+
+### Worker logs `team_send_message ENOENT` / `team_update_task ENOENT`
+
+Meaning:
+- Team state path no longer exists while worker is still running.
+- Typical cause: leader/manual flow ran `omx team shutdown <team>` (or removed `.omx/state/team/<team>`) before worker finished.
+
+Checks:
+
+1. `omx team status <team>` and confirm whether tasks were still `in_progress` when shutdown occurred
+2. Verify whether `.omx/state/team/<team>/` exists
+3. Inspect worker pane tail for post-shutdown writes
+4. Confirm no external cleanup (`rm -rf .omx/state/team/<team>`) happened during execution
+
+Prevention:
+
+1. Enforce completion gate (no in-progress tasks) before shutdown
+2. Use `shutdown` only for terminal completion or explicit abort
+3. If aborting, expect late worker writes to fail and treat ENOENT as expected teardown artifact
+
+### Shutdown reports success but stale worker panes remain
+
+Cause:
+- stale pane outside config tracking or previous failed run
+
+Fix:
+- manual pane cleanup (see clean-slate commands)
+
+## Clean-Slate Recovery
+
+Run from leader pane:
+
+```bash
+# 1) Inspect panes
+tmux list-panes -F '#{pane_id}\t#{pane_current_command}\t#{pane_start_command}'
+
+# 2) Kill stale worker panes only (examples)
+tmux kill-pane -t %450
+tmux kill-pane -t %451
+
+# 3) Remove stale team state (example)
+rm -rf .omx/state/team/<team-name>
+
+# 4) Retry
+omx team 1:executor "fresh retry"
+```
+
+Guidelines:
+
+- Do not kill leader pane
+- Do not kill HUD pane (`omx hud --watch`) unless intentionally restarting HUD
+
+## Required Reporting During Execution
+
+When operating this skill, provide concrete progress evidence:
+
+1. Team started line (`Team started: <name>`)
+2. tmux target and worker pane presence
+3. leader mailbox ACK path/content check
+4. status/shutdown outcomes
+
+Do not claim success without file/pane evidence.
+Do not claim clean completion if shutdown occurred with `in_progress>0`.
+
+## Limitations
+
+- No git worktree isolation; workers share working tree
+- send-keys interactions can be timing-sensitive under load
+- stale panes from prior runs can interfere until manually cleaned

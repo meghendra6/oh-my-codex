@@ -11,6 +11,7 @@ import { doctor } from './doctor.js';
 import { version } from './version.js';
 import { tmuxHookCommand } from './tmux-hook.js';
 import { hudCommand } from '../hud/index.js';
+import { teamCommand } from './team.js';
 import { getAllScopedStateDirs, getBaseStateDir, getStateDir } from '../mcp/state-paths.js';
 import { maybeCheckAndPromptUpdate } from './update.js';
 import { generateOverlay, applyOverlay, stripOverlay } from '../hooks/agents-overlay.js';
@@ -27,6 +28,7 @@ Usage:
   omx setup     Install skills, prompts, MCP servers, and AGENTS.md
   omx doctor    Check installation health
   omx doctor --team  Check team/swarm runtime health diagnostics
+  omx team      Spawn parallel worker panes in tmux and bootstrap inbox/task state
   omx version   Show version information
   omx tmux-hook Manage tmux prompt injection workaround (init|status|validate|test)
   omx hud       Show HUD statusline (--watch, --json, --preset=NAME)
@@ -48,7 +50,7 @@ const CODEX_BYPASS_FLAG = '--dangerously-bypass-approvals-and-sandbox';
 
 export async function main(args: string[]): Promise<void> {
   const knownCommands = new Set([
-    'launch', 'setup', 'doctor', 'version', 'tmux-hook', 'hud', 'status', 'cancel', 'help', '--help', '-h',
+    'launch', 'setup', 'doctor', 'team', 'version', 'tmux-hook', 'hud', 'status', 'cancel', 'help', '--help', '-h',
   ]);
   const firstArg = args[0];
   const command = !firstArg || firstArg.startsWith('--') ? 'launch' : firstArg;
@@ -73,6 +75,9 @@ export async function main(args: string[]): Promise<void> {
         break;
       case 'doctor':
         await doctor(options);
+        break;
+      case 'team':
+        await teamCommand(args.slice(1), options);
         break;
       case 'version':
         version();

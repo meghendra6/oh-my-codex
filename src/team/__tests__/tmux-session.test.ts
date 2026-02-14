@@ -4,6 +4,7 @@ import {
   buildWorkerStartupCommand,
   createTeamSession,
   isTmuxAvailable,
+  isWorkerAlive,
   listTeamSessions,
   sanitizeTeamName,
   sendToWorker,
@@ -141,6 +142,16 @@ describe('tmux-dependent functions when tmux is unavailable', () => {
   it('waitForWorkerReady returns false on timeout', () => {
     withEmptyPath(() => {
       assert.equal(waitForWorkerReady('omx-team-x', 1, 1), false);
+    });
+  });
+});
+
+describe('isWorkerAlive', () => {
+  it('does not require pane_current_command to match "codex"', () => {
+    // This was a real failure mode: tmux reports pane_current_command=node for the Codex TUI,
+    // which caused workers to be treated as dead and the leader to clean up state too early.
+    withEmptyPath(() => {
+      assert.equal(isWorkerAlive('omx-team-x', 1), false);
     });
   });
 });

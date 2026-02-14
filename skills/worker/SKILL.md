@@ -38,12 +38,14 @@ Use the MCP tool:
    `.omx/state/team/<teamName>/workers/<workerName>/inbox.md`
 2. Pick the first unblocked task assigned to you.
 3. Read the task file:
-   `.omx/state/team/<teamName>/tasks/task-<id>.json`
-4. Claim the task (do NOT start work without a claim). Use the team state APIs described in your inbox/overlay.
-5. Do the work.
-6. Write completion to the task file:
+   `.omx/state/team/<teamName>/tasks/task-<id>.json` (example: `task-1.json`)
+4. Task id format:
+   - The MCP/state API uses the numeric id (`"1"`), not `"task-1"`.
+5. Claim the task (do NOT start work without a claim). Use the team state APIs described in your inbox/overlay.
+6. Do the work.
+7. Write completion to the task file:
    - `{"status":"completed","result":"..."}` or `{"status":"failed","error":"..."}`
-7. Update your worker status:
+8. Update your worker status:
    `.omx/state/team/<teamName>/workers/<workerName>/status.json` with `{"state":"idle", ...}`
 
 ## Mailbox

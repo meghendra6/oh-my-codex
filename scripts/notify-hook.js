@@ -429,6 +429,108 @@ async function getScopedStateDirsForCurrentSession(baseStateDir) {
   return scopedDirs;
 }
 
+function resolveLeaderNudgeIntervalMs() {
+  const raw = safeString(process.env.OMX_TEAM_LEADER_NUDGE_MS || '');
+  const parsed = asNumber(raw);
+  // Default: 2 minutes. Guard against spam.
+  if (parsed !== null && parsed >= 10_000 && parsed <= 30 * 60_000) return parsed;
+  return 120_000;
+}
+
+async function maybeNudgeTeamLeader({ cwd, stateDir, logsDir }) {
+  const intervalMs = resolveLeaderNudgeIntervalMs();
+  const nowMs = Date.now();
+  const nowIso = new Date().toISOString();
+  const omxDir = join(cwd, '.omx');
+  const nudgeStatePath = join(stateDir, 'team-leader-nudge.json');
+
+  let nudgeState = await readJsonIfExists(nudgeStatePath, null);
+  if (!nudgeState || typeof nudgeState !== 'object') {
+    nudgeState = { last_nudged_by_team: {} };
+  }
+  if (!nudgeState.last_nudged_by_team || typeof nudgeState.last_nudged_by_team !== 'object') {
+    nudgeState.last_nudged_by_team = {};
+  }
+
+  const activeTeamNames = new Set();
+  try {
+    const scopedDirs = await getScopedStateDirsForCurrentSession(stateDir);
+    for (const scopedDir of scopedDirs) {
+      const teamStatePath = join(scopedDir, 'team-state.json');
+      if (!existsSync(teamStatePath)) continue;
+      const parsed = JSON.parse(await readFile(teamStatePath, 'utf-8'));
+      if (!parsed || parsed.active !== true) continue;
+      const teamName = safeString(parsed.team_name || '').trim();
+      if (teamName) activeTeamNames.add(teamName);
+    }
+  } catch {
+    // Non-critical
+  }
+
+  for (const teamName of activeTeamNames) {
+    // Resolve tmux target (session:window) from manifest/config. Best effort.
+    let tmuxTarget = '';
+    try {
+      const manifestPath = join(omxDir, 'state', 'team', teamName, 'manifest.v2.json');
+      const configPath = join(omxDir, 'state', 'team', teamName, 'config.json');
+      const srcPath = existsSync(manifestPath) ? manifestPath : configPath;
+      if (existsSync(srcPath)) {
+        const raw = JSON.parse(await readFile(srcPath, 'utf-8'));
+        tmuxTarget = safeString(raw && raw.tmux_session ? raw.tmux_session : '').trim();
+      }
+    } catch {
+      // ignore
+    }
+    if (!tmuxTarget) continue;
+
+    let mailbox = null;
+    try {
+      const mailboxPath = join(omxDir, 'state', 'team', teamName, 'mailbox', 'leader-fixed.json');
+      mailbox = await readJsonIfExists(mailboxPath, null);
+    } catch {
+      mailbox = null;
+    }
+    const messages = mailbox && Array.isArray(mailbox.messages) ? mailbox.messages : [];
+    const newest = messages.length > 0 ? messages[messages.length - 1] : null;
+    const newestId = newest && typeof newest.message_id === 'string' ? newest.message_id : '';
+
+    const prev = nudgeState.last_nudged_by_team[teamName] && typeof nudgeState.last_nudged_by_team[teamName] === 'object'
+      ? nudgeState.last_nudged_by_team[teamName]
+      : {};
+    const prevAtIso = safeString(prev.at || '');
+    const prevAtMs = prevAtIso ? Date.parse(prevAtIso) : NaN;
+    const prevMsgId = safeString(prev.last_message_id || '');
+
+    const hasNewMessage = newestId && newestId !== prevMsgId;
+    const dueByTime = !Number.isFinite(prevAtMs) || (nowMs - prevAtMs >= intervalMs);
+    if (!hasNewMessage && !dueByTime) continue;
+
+    const msgCount = messages.length;
+    const text = hasNewMessage
+      ? `Team ${teamName}: ${msgCount} msg(s) for leader. Run: omx team status ${teamName}`
+      : `Team ${teamName} active. Run: omx team status ${teamName}`;
+    const capped = text.length > 180 ? `${text.slice(0, 177)}...` : text;
+
+    try {
+      await runProcess('tmux', ['display-message', '-t', tmuxTarget, '--', capped], 1200);
+      nudgeState.last_nudged_by_team[teamName] = { at: nowIso, last_message_id: newestId || prevMsgId || '' };
+    } catch (err) {
+      // Best effort. Log only in debug mode to avoid noise.
+      try {
+        await logTmuxHookEvent(logsDir, {
+          timestamp: nowIso,
+          type: 'team_leader_nudge',
+          team: teamName,
+          tmux_target: tmuxTarget,
+          error: safeString(err && err.message ? err.message : err),
+        });
+      } catch { /* ignore */ }
+    }
+  }
+
+  await writeFile(nudgeStatePath, JSON.stringify(nudgeState, null, 2)).catch(() => {});
+}
+
 async function handleTmuxInjection({
   payload,
   cwd,
@@ -916,6 +1018,15 @@ async function main() {
   if (!isTeamWorker) {
     try {
       await handleTmuxInjection({ payload, cwd, stateDir, logsDir });
+    } catch {
+      // Non-critical
+    }
+  }
+
+  // 6. Team leader nudge (lead session only): remind the leader to check teammate/mailbox state.
+  if (!isTeamWorker) {
+    try {
+      await maybeNudgeTeamLeader({ cwd, stateDir, logsDir });
     } catch {
       // Non-critical
     }

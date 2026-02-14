@@ -51,14 +51,17 @@ function listPanes(target: string): TmuxPaneInfo[] {
     .filter((pane) => pane.paneId.startsWith('%'));
 }
 
-function findHudPaneId(target: string, leaderPaneId: string): string | null {
+function isHudWatchPane(pane: TmuxPaneInfo): boolean {
+  const start = pane.startCommand || '';
+  return /\bomx\b.*\bhud\b.*--watch/i.test(start);
+}
+
+function findHudPaneIds(target: string, leaderPaneId: string): string[] {
   const panes = listPanes(target);
-  for (const pane of panes) {
-    if (pane.paneId === leaderPaneId) continue;
-    const start = pane.startCommand || '';
-    if (/\bomx\b.*\bhud\b.*--watch/i.test(start)) return pane.paneId;
-  }
-  return null;
+  return panes
+    .filter((pane) => pane.paneId !== leaderPaneId)
+    .filter((pane) => isHudWatchPane(pane))
+    .map((pane) => pane.paneId);
 }
 
 function sleepSeconds(seconds: number): void {
@@ -161,7 +164,12 @@ export function createTeamSession(
     throw new Error(`failed to parse current tmux target: ${context.stdout}`);
   }
   const teamTarget = `${sessionName}:${windowIndex}`;
-  const hudPaneId = findHudPaneId(teamTarget, leaderPaneId);
+  const initialHudPaneIds = findHudPaneIds(teamTarget, leaderPaneId);
+  // Team mode prioritizes leader + worker visibility. Remove HUD panes in this window
+  // to keep a clean "leader left / workers right" layout.
+  for (const hudPaneId of initialHudPaneIds) {
+    runTmux(['kill-pane', '-t', hudPaneId]);
+  }
 
   const workerPaneIds: string[] = [];
   let rightStackRootPaneId: string | null = null;
@@ -197,10 +205,23 @@ export function createTeamSession(
   // Keep leader as full left/main pane; workers stay stacked on the right.
   runTmux(['select-layout', '-t', teamTarget, 'main-vertical']);
 
-  // If HUD exists, ensure it remains attached under leader (not in worker stack).
-  if (hudPaneId) {
-    runTmux(['join-pane', '-v', '-s', hudPaneId, '-t', leaderPaneId]);
-    runTmux(['resize-pane', '-t', hudPaneId, '-y', '4']);
+  // Force leader pane to use half the window width.
+  const windowWidthResult = runTmux(['display-message', '-p', '-t', teamTarget, '#{window_width}']);
+  if (windowWidthResult.ok) {
+    const width = Number.parseInt(windowWidthResult.stdout.split('\n')[0]?.trim() || '', 10);
+    if (Number.isFinite(width) && width >= 40) {
+      const half = String(Math.floor(width / 2));
+      runTmux(['set-window-option', '-t', teamTarget, 'main-pane-width', half]);
+      runTmux(['select-layout', '-t', teamTarget, 'main-vertical']);
+    }
+  }
+
+  // Re-create a single HUD pane under the leader column for team visibility.
+  // Keep this after layout sizing so HUD does not get mixed into worker stack.
+  const omxEntry = process.argv[1];
+  if (omxEntry && omxEntry.trim() !== '') {
+    const hudCmd = `node ${shellQuoteSingle(omxEntry)} hud --watch`;
+    runTmux(['split-window', '-v', '-l', '4', '-t', leaderPaneId, '-d', '-c', cwd, hudCmd]);
   }
 
   runTmux(['select-pane', '-t', leaderPaneId]);
@@ -264,13 +285,22 @@ export function waitForWorkerReady(
   const startedAt = Date.now();
   let blockedByTrustPrompt = false;
 
+  const sendRobustEnter = (): void => {
+    const target = paneTarget(sessionName, workerIndex, workerPaneId);
+    // Trust + follow-up splash can require two submits in Codex TUI.
+    runTmux(['send-keys', '-t', target, 'Enter']);
+    sleepFractionalSeconds(0.12);
+    runTmux(['send-keys', '-t', target, 'Enter']);
+  };
+
   const check = (): boolean => {
     const result = runTmux(['capture-pane', '-t', paneTarget(sessionName, workerIndex, workerPaneId), '-p']);
     if (!result.ok) return false;
     if (paneHasTrustPrompt(result.stdout)) {
-      // Opt-in only: do not auto-trust directories unless explicitly configured.
-      if (process.env.OMX_TEAM_AUTO_TRUST === '1') {
-        runTmux(['send-keys', '-t', paneTarget(sessionName, workerIndex, workerPaneId), 'Enter']);
+      // Default-on for team workers: they are spawned explicitly by the leader in the same cwd.
+      // Opt-out by setting OMX_TEAM_AUTO_TRUST=0.
+      if (process.env.OMX_TEAM_AUTO_TRUST !== '0') {
+        sendRobustEnter();
         return false;
       }
       blockedByTrustPrompt = true;
@@ -293,12 +323,16 @@ export function waitForWorkerReady(
 }
 
 function paneTailContainsLiteralLine(target: string, text: string): boolean {
-  const result = runTmux(['capture-pane', '-t', target, '-p', '-S', '-30']);
+  const result = runTmux(['capture-pane', '-t', target, '-p', '-S', '-80']);
   if (!result.ok) return false;
-  const lines = result.stdout
-    .split('\n')
-    .map((line) => line.replace(/\r/g, '').trimEnd());
-  return lines.some((line) => line === text);
+  return normalizeTmuxCapture(result.stdout).includes(normalizeTmuxCapture(text));
+}
+
+export function normalizeTmuxCapture(value: string): string {
+  return value
+    .replace(/\r/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // Send SHORT text (<200 chars) to worker via tmux send-keys
@@ -314,27 +348,46 @@ export function sendToWorker(sessionName: string, workerIndex: number, text: str
 
   const target = paneTarget(sessionName, workerIndex, workerPaneId);
 
+  // Guard: if the trust prompt is still present, advance it first so our trigger text
+  // doesn't get typed into the trust screen and ignored.
+  const captured = runTmux(['capture-pane', '-t', target, '-p', '-S', '-80']);
+  if (captured.ok && paneHasTrustPrompt(captured.stdout)) {
+    runTmux(['send-keys', '-t', target, 'Enter']);
+    sleepFractionalSeconds(0.12);
+    runTmux(['send-keys', '-t', target, 'Enter']);
+    sleepFractionalSeconds(0.2);
+  }
+
   const send = runTmux(['send-keys', '-t', target, '-l', '--', text]);
   if (!send.ok) {
     throw new Error(`sendToWorker: failed to send text: ${send.stderr}`);
   }
 
-  // Submit robustly: retry Enter while the literal input line is still visible.
-  // This avoids dropped-enter behavior in Codex TUI under tmux load.
-  const submitAttempts: Array<{ keys: string[]; delaySeconds: number }> = [
-    { keys: ['Enter'], delaySeconds: 0.12 },
-    { keys: ['C-m'], delaySeconds: 0.12 },
-    { keys: ['Enter'], delaySeconds: 0.12 },
-    { keys: ['C-j'], delaySeconds: 0.08 },
-  ];
-  for (const attempt of submitAttempts) {
-    const res = runTmux(['send-keys', '-t', target, ...attempt.keys]);
-    if (!res.ok) {
-      throw new Error(`sendToWorker: failed to send ${attempt.keys.join('+')}: ${res.stderr}`);
-    }
-    sleepFractionalSeconds(attempt.delaySeconds);
-    if (!paneTailContainsLiteralLine(target, text)) break;
+  // Submit deterministically: Enter twice with short sleep between presses.
+  // Repeat a few rounds only if the literal input line is still visible.
+  const submitRounds = 6;
+  for (let round = 0; round < submitRounds; round++) {
+    const first = runTmux(['send-keys', '-t', target, 'Enter']);
+    if (!first.ok) throw new Error(`sendToWorker: failed to send Enter: ${first.stderr}`);
+    sleepFractionalSeconds(0.12);
+    const second = runTmux(['send-keys', '-t', target, 'Enter']);
+    if (!second.ok) throw new Error(`sendToWorker: failed to send Enter: ${second.stderr}`);
+    sleepFractionalSeconds(0.14);
+    if (!paneTailContainsLiteralLine(target, text)) return;
+    sleepFractionalSeconds(0.14);
   }
+
+  // Fail-open by default: Codex may keep the last submitted line visible even after executing it.
+  // If you need strictness for debugging, set OMX_TEAM_STRICT_SUBMIT=1.
+  const strict = process.env.OMX_TEAM_STRICT_SUBMIT === '1';
+  if (strict) {
+    throw new Error('sendToWorker: submit_failed (trigger text still visible after retries)');
+  }
+
+  // One last best-effort double-enter nudge, then continue.
+  runTmux(['send-keys', '-t', target, 'Enter']);
+  sleepFractionalSeconds(0.12);
+  runTmux(['send-keys', '-t', target, 'Enter']);
 }
 
 export function notifyLeaderStatus(sessionName: string, message: string): boolean {
@@ -365,7 +418,7 @@ export function isWorkerAlive(sessionName: string, workerIndex: number, workerPa
     'list-panes',
     '-t', paneTarget(sessionName, workerIndex, workerPaneId),
     '-F',
-    '#{pane_dead} #{pane_current_command} #{pane_pid}',
+    '#{pane_dead} #{pane_pid}',
   ]);
   if (!result.ok) return false;
 
@@ -373,15 +426,13 @@ export function isWorkerAlive(sessionName: string, workerIndex: number, workerPa
   if (!line) return false;
 
   const parts = line.split(/\s+/);
-  if (parts.length < 3) return false;
+  if (parts.length < 2) return false;
 
   const paneDead = parts[0];
-  const paneCommand = parts[1] || '';
-  const pid = Number.parseInt(parts[2], 10);
+  const pid = Number.parseInt(parts[1], 10);
 
   if (paneDead === '1') return false;
   if (!Number.isFinite(pid)) return false;
-  if (!/codex/i.test(paneCommand)) return false;
 
   try {
     process.kill(pid, 0);

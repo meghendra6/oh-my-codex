@@ -118,12 +118,14 @@ ${taskList}
 1. Load and follow \`skills/worker/SKILL.md\`
 2. Send startup ACK to the lead mailbox using MCP tool \`team_send_message\` with \`to_worker="leader-fixed"\`
 3. Start with the first non-blocked task
-4. Read the task file for your selected task id at \`.omx/state/team/${teamName}/tasks/task-<id>.json\`
-5. Request a claim via state API (\`claimTask\`) to claim it
-6. Complete the work described in the task
-7. Write \`{"status": "completed", "result": "brief summary"}\` to the task file
-8. Write \`{"state": "idle"}\` to \`.omx/state/team/${teamName}/workers/${workerName}/status.json\`
-9. Wait for the next instruction from the lead
+4. Read the task file for your selected task id at \`.omx/state/team/${teamName}/tasks/task-<id>.json\` (example: \`task-1.json\`)
+5. Task id format:
+   - State/MCP APIs use \`task_id: "<id>"\` (example: \`"1"\`), not \`"task-1"\`.
+6. Request a claim via state API (\`claimTask\`) to claim it
+7. Complete the work described in the task
+8. Write \`{"status": "completed", "result": "brief summary"}\` to the task file
+9. Write \`{"state": "idle"}\` to \`.omx/state/team/${teamName}/workers/${workerName}/status.json\`
+10. Wait for the next instruction from the lead
 
 ## Scope Rules
 - Only edit files described in your task descriptions
@@ -153,10 +155,12 @@ ${taskDescription}
 ## Instructions
 
 1. Read the task file at \`.omx/state/team/${teamName}/tasks/task-${taskId}.json\`
-2. Request a claim via state API (\`claimTask\`)
-3. Complete the work
-4. Write \`{"status": "completed", "result": "brief summary"}\` when done
-5. Write \`{"state": "idle"}\` to your status file
+2. Task id format:
+   - State/MCP APIs use \`task_id: "${taskId}"\` (not \`"task-${taskId}"\`).
+3. Request a claim via state API (\`claimTask\`)
+4. Complete the work
+5. Write \`{"status": "completed", "result": "brief summary"}\` when done
+6. Write \`{"state": "idle"}\` to your status file
 `;
 }
 

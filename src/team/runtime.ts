@@ -586,7 +586,8 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
 
   const anyAliveAfterWait = config.workers.some(w => isWorkerAlive(sessionName, w.index, w.pane_id));
   if (anyAliveAfterWait && !force) {
-    throw new Error('workers_still_active');
+    // Workers may have accepted shutdown but not exited (Codex TUI requires explicit exit).
+    // In this case, proceed to force kill panes (next step) rather than failing and leaving state around.
   }
 
   // 3. Force kill remaining workers
