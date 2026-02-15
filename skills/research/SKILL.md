@@ -460,21 +460,16 @@ Report generator embeds figures:
 
 ## Configuration
 
-Optional settings in `.claude/settings.json`:
+Optional settings in `~/.codex/config.toml`:
 
-```json
-{
-  "omc": {
-    "research": {
-      "maxIterations": 10,
-      "maxConcurrentScientists": 5,
-      "defaultTier": "MEDIUM",
-      "autoVerify": true,
-      "generateFigures": true,
-      "evidenceContextLines": 5
-    }
-  }
-}
+```toml
+[omc.research]
+maxIterations = 10
+maxConcurrentScientists = 5
+defaultTier = "MEDIUM"
+autoVerify = true
+generateFigures = true
+evidenceContextLines = 5
 ```
 
 ## Cancellation

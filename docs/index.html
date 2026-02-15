@@ -27,8 +27,8 @@
 
       <h2>Core Features</h2>
       <div class="grid">
-        <article class="card"><h3>30 Agents</h3><p>Specialized prompt roles for implementation, review, design, and planning.</p></article>
-        <article class="card"><h3>39 Skills</h3><p>Composable workflows from autopilot and team pipelines to release and tracing.</p></article>
+        <article class="card"><h3>30 Agent Prompts</h3><p>Specialized roles for implementation, review, design, and planning.</p></article>
+        <article class="card"><h3>40 Skills</h3><p>Composable workflows from autopilot and team pipelines to setup, release, and tracing.</p></article>
         <article class="card"><h3>Team Orchestration</h3><p>Staged execution pipeline with verification and fix loops.</p></article>
         <article class="card"><h3>MCP State Management</h3><p>Persistent lifecycle state, notepad, and project memory across sessions.</p></article>
       </div>
@@ -38,17 +38,17 @@
         <li><code>npm install -g oh-my-codex</code></li>
         <li><code>omx setup</code></li>
         <li><code>omx doctor</code></li>
-        <li>Start Codex CLI and run agent prompts or skills.</li>
+        <li><code>omx --xhigh --madmax</code> (trusted environments) or <code>omx</code></li>
       </ol>
 
       <h2>Architecture</h2>
       <pre><code>User
   -> Codex CLI
      -> AGENTS.md (orchestration brain)
-     -> ~/.codex/prompts/*.md (30 agents)
-     -> ~/.agents/skills/*/SKILL.md (39 skills)
-     -> config.toml (MCP + notify + features)
-     -> .omx/ (state, memory, notepad, plans)</code></pre>
+     -> ~/.codex/prompts/*.md (30 agent prompts)
+     -> ~/.agents/skills/*/SKILL.md (40 skills)
+     -> ~/.codex/config.toml (features, notify, MCP)
+     -> .omx/ (runtime state, memory, plans, logs)</code></pre>
     </main>
 
     <footer>

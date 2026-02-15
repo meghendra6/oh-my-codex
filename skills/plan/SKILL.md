@@ -103,7 +103,7 @@ Plans are saved to `.omx/plans/`. Drafts go to `.omx/drafts/`.
 - Use `ask_codex` with `agent_role: "planner"` for planning validation on large-scope plans
 - Use `ask_codex` with `agent_role: "analyst"` for requirements analysis
 - Use `ask_codex` with `agent_role: "critic"` for plan review in consensus and review modes
-- If ToolSearch finds no MCP tools or Codex is unavailable, fall back to equivalent Claude agents -- never block on external tools
+- If ToolSearch finds no MCP tools or Codex is unavailable, fall back to equivalent OMX prompt agents -- never block on external tools
 - In consensus mode, **MUST** use `AskUserQuestion` for the user feedback step (step 2) and the final approval step (step 6) -- never ask for approval in plain text
 - In consensus mode, on user approval **MUST** invoke `/ralph` for execution (step 8) -- never implement directly in the planning agent
 </Tool_Usage>

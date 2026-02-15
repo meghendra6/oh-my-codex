@@ -14,12 +14,12 @@ Set up Discord notifications so OMX can ping you when sessions end, need input, 
 
 ## How This Skill Works
 
-This is an interactive, natural-language configuration skill. Walk the user through setup by asking questions with AskUserQuestion. Write the result to `~/.claude/.omx-config.json`.
+This is an interactive, natural-language configuration skill. Walk the user through setup by asking questions with AskUserQuestion. Write the result to `~/.codex/.omx-config.json`.
 
 ## Step 1: Detect Existing Configuration
 
 ```bash
-CONFIG_FILE="$HOME/.claude/.omx-config.json"
+CONFIG_FILE="$HOME/.codex/.omx-config.json"
 
 if [ -f "$CONFIG_FILE" ]; then
   # Check for existing discord config
@@ -107,8 +107,8 @@ Use AskUserQuestion with multiSelect:
 **Question:** "Which events should trigger Discord notifications?"
 
 **Options (multiSelect: true):**
-1. **Session end (Recommended)** - When a Claude session finishes
-2. **Input needed** - When Claude is waiting for your response (great for long-running tasks)
+1. **Session end (Recommended)** - When a Codex session finishes
+2. **Input needed** - When Codex is waiting for your response (great for long-running tasks)
 3. **Session start** - When a new session begins
 4. **Session continuing** - When a persistent mode keeps the session alive
 
@@ -130,7 +130,7 @@ Use AskUserQuestion:
 Read the existing config, merge the new Discord settings, and write back:
 
 ```bash
-CONFIG_FILE="$HOME/.claude/.omx-config.json"
+CONFIG_FILE="$HOME/.codex/.omx-config.json"
 mkdir -p "$(dirname "$CONFIG_FILE")"
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -226,7 +226,7 @@ Discord Notifications Configured!
   Events:   session-end, ask-user-question
   Username: OMX
 
-Config saved to: ~/.claude/.omx-config.json
+Config saved to: ~/.codex/.omx-config.json
 
 You can also set these via environment variables:
   OMX_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...

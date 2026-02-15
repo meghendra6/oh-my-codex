@@ -18,7 +18,7 @@
     </header>
 
     <main class="container">
-      <h1>Skills Reference (39)</h1>
+      <h1>Skills Reference (40)</h1>
       <p class="muted">All skills with category grouping and <code>$name</code> usage syntax.</p>
 
       <h2>Execution Modes (9)</h2>
@@ -53,18 +53,19 @@
         <li><code>$review</code></li>
       </ul>
 
-      <h2>Utilities (19)</h2>
+      <h2>Utilities (20)</h2>
       <ul>
         <li><code>$cancel</code>, <code>$doctor</code>, <code>$help</code>, <code>$note</code>, <code>$trace</code></li>
         <li><code>$skill</code>, <code>$learner</code>, <code>$research</code>, <code>$deepinit</code>, <code>$release</code></li>
         <li><code>$hud</code>, <code>$omx-setup</code>, <code>$configure-telegram</code>, <code>$configure-discord</code></li>
         <li><code>$writer-memory</code>, <code>$project-session-manager</code>, <code>$psm</code></li>
         <li><code>$ralph-init</code>, <code>$learn-about-omx</code></li>
+        <li><code>$worker</code> (internal) - team worker protocol / lifecycle</li>
       </ul>
 
       <h2>Usage Examples</h2>
       <pre><code>$autopilot "build a release checklist"
-$team "fix all TypeScript errors"
+$team 3:executor "fix all TypeScript errors"
 $plan "plan migration from v1 to v2"
 $code-review "review current branch"
 $doctor</code></pre>

@@ -345,22 +345,17 @@ Tracks which worker owns which files (see Phase 2 example above).
 
 ## Configuration
 
-Optional settings in `.claude/settings.json`:
+Optional settings in `~/.codex/config.toml`:
 
-```json
-{
-  "omc": {
-    "ultrapilot": {
-      "maxWorkers": 5,
-      "maxValidationRounds": 3,
-      "conflictPolicy": "coordinator-handles",
-      "fallbackToAutopilot": true,
-      "parallelThreshold": 2,
-      "pauseAfterDecomposition": false,
-      "verboseProgress": true
-    }
-  }
-}
+```toml
+[omc.ultrapilot]
+maxWorkers = 5
+maxValidationRounds = 3
+conflictPolicy = "coordinator-handles"
+fallbackToAutopilot = true
+parallelThreshold = 2
+pauseAfterDecomposition = false
+verboseProgress = true
 ```
 
 **Settings Explained:**

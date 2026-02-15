@@ -56,9 +56,13 @@ const CODEX_BYPASS_FLAG = '--dangerously-bypass-approvals-and-sandbox';
 const HIGH_REASONING_FLAG = '--high';
 const XHIGH_REASONING_FLAG = '--xhigh';
 const CONFIG_FLAG = '-c';
+const LONG_CONFIG_FLAG = '--config';
 const REASONING_KEY = 'model_reasoning_effort';
+const MODEL_INSTRUCTIONS_FILE_KEY = 'model_instructions_file';
 const TEAM_WORKER_LAUNCH_ARGS_ENV = 'OMX_TEAM_WORKER_LAUNCH_ARGS';
 const TEAM_INHERIT_LEADER_FLAGS_ENV = 'OMX_TEAM_INHERIT_LEADER_FLAGS';
+const OMX_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV = 'OMX_BYPASS_DEFAULT_SYSTEM_PROMPT';
+const OMX_MODEL_INSTRUCTIONS_FILE_ENV = 'OMX_MODEL_INSTRUCTIONS_FILE';
 const REASONING_MODES = ['low', 'medium', 'high', 'xhigh'] as const;
 type ReasoningMode = typeof REASONING_MODES[number];
 const REASONING_MODE_SET = new Set<string>(REASONING_MODES);
@@ -276,6 +280,44 @@ function isReasoningOverride(value: string): boolean {
   return new RegExp(`^${REASONING_KEY}\\s*=`).test(value.trim());
 }
 
+function isModelInstructionsOverride(value: string): boolean {
+  return new RegExp(`^${MODEL_INSTRUCTIONS_FILE_KEY}\\s*=`).test(value.trim());
+}
+
+function hasModelInstructionsOverride(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === CONFIG_FLAG || arg === LONG_CONFIG_FLAG) {
+      const maybeValue = args[i + 1];
+      if (typeof maybeValue === 'string' && isModelInstructionsOverride(maybeValue)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (arg.startsWith(`${LONG_CONFIG_FLAG}=`)) {
+      const inlineValue = arg.slice(`${LONG_CONFIG_FLAG}=`.length);
+      if (isModelInstructionsOverride(inlineValue)) return true;
+    }
+  }
+  return false;
+}
+
+function shouldBypassDefaultSystemPrompt(env: NodeJS.ProcessEnv): boolean {
+  return env[OMX_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV] !== '0';
+}
+
+function buildModelInstructionsOverride(cwd: string, env: NodeJS.ProcessEnv): string {
+  const filePath = env[OMX_MODEL_INSTRUCTIONS_FILE_ENV] || join(cwd, 'AGENTS.md');
+  return `${MODEL_INSTRUCTIONS_FILE_KEY}="${escapeTomlString(filePath)}"`;
+}
+
+export function injectModelInstructionsBypassArgs(cwd: string, args: string[], env: NodeJS.ProcessEnv = process.env): string[] {
+  if (!shouldBypassDefaultSystemPrompt(env)) return [...args];
+  if (hasModelInstructionsOverride(args)) return [...args];
+  return [...args, CONFIG_FLAG, buildModelInstructionsOverride(cwd, env)];
+}
+
 function splitWorkerLaunchArgs(raw: string | undefined): string[] {
   if (!raw || raw.trim() === '') return [];
   return raw
@@ -484,11 +526,16 @@ async function preLaunch(cwd: string, sessionId: string): Promise<void> {
  * All 3 paths (new tmux, existing tmux, no tmux) block via execSync/execFileSync.
  */
 function runCodex(cwd: string, args: string[]): void {
+  const launchArgs = injectModelInstructionsBypassArgs(cwd, args);
   const omxBin = process.argv[1];
-  const codexCmd = buildTmuxShellCommand('codex', args);
+  const codexCmd = buildTmuxShellCommand('codex', launchArgs);
   const hudCmd = buildTmuxShellCommand('node', [omxBin, 'hud', '--watch']);
   const inheritLeaderFlags = process.env[TEAM_INHERIT_LEADER_FLAGS_ENV] !== '0';
-  const workerLaunchArgs = resolveTeamWorkerLaunchArgsEnv(process.env[TEAM_WORKER_LAUNCH_ARGS_ENV], args, inheritLeaderFlags);
+  const workerLaunchArgs = resolveTeamWorkerLaunchArgsEnv(
+    process.env[TEAM_WORKER_LAUNCH_ARGS_ENV],
+    launchArgs,
+    inheritLeaderFlags
+  );
   const codexEnv = workerLaunchArgs
     ? { ...process.env, [TEAM_WORKER_LAUNCH_ARGS_ENV]: workerLaunchArgs }
     : process.env;
@@ -506,7 +553,7 @@ function runCodex(cwd: string, args: string[]): void {
     }
     // execFileSync imported at top level
     try {
-      execFileSync('codex', args, { cwd, stdio: 'inherit', env: codexEnv });
+      execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
     } catch {
       // Codex exited
     }
@@ -535,7 +582,7 @@ function runCodex(cwd: string, args: string[]): void {
       console.log('tmux not available, launching codex without HUD...');
       // execFileSync imported at top level
       try {
-        execFileSync('codex', args, { cwd, stdio: 'inherit', env: codexEnv });
+        execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
       } catch {
         // Codex exited
       }

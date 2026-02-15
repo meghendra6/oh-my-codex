@@ -28,7 +28,7 @@ Deep investigation requires a different approach than quick lookups or code chan
 
 <Execution_Policy>
 - Prefer Codex MCP for analysis when available (faster, lower cost)
-- Fall back to architect Claude agent when Codex is unavailable
+- Fall back to architect agent when Codex is unavailable
 - Always provide context files to the analysis tool for grounded reasoning
 - Return structured findings, not just raw observations
 </Execution_Policy>

@@ -166,7 +166,7 @@ When the user invokes a PSM command, follow this protocol:
 Parse `{{ARGUMENTS}}` to determine:
 1. **Subcommand**: review, fix, feature, list, attach, kill, cleanup, status
 2. **Reference**: project#number, URL, or session ID
-3. **Options**: --branch, --base, --no-claude, --no-tmux, etc.
+3. **Options**: --branch, --base, --no-codex, --no-tmux, etc.
 
 ### Subcommand: `review <ref>`
 
@@ -243,9 +243,9 @@ Parse `{{ARGUMENTS}}` to determine:
    tmux new-session -d -s "psm:$project_alias:pr-$pr_number" -c "$worktree_path"
    ```
 
-8. **Launch Codex CLI** (unless --no-claude):
+8. **Launch Codex CLI** (unless --no-codex):
    ```bash
-   tmux send-keys -t "psm:$project_alias:pr-$pr_number" "claude" Enter
+   tmux send-keys -t "psm:$project_alias:pr-$pr_number" "codex" Enter
    ```
 
 9. **Output session info**:
@@ -288,7 +288,7 @@ Parse `{{ARGUMENTS}}` to determine:
 
 5. **Create session metadata** (similar to review, type="fix")
 
-6. **Update registry, create tmux, launch claude** (same as review)
+6. **Update registry, create tmux, launch codex** (same as review)
 
 ### Subcommand: `feature <project> <name>`
 
@@ -312,7 +312,7 @@ Parse `{{ARGUMENTS}}` to determine:
    git worktree add "$worktree_path" "$branch_name"
    ```
 
-4. **Create session, tmux, launch claude** (same pattern)
+4. **Create session, tmux, launch codex** (same pattern)
 
 ### Subcommand: `list [project]`
 

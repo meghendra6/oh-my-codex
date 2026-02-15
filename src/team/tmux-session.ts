@@ -1,4 +1,5 @@
 import { spawnSync } from 'child_process';
+import { join } from 'path';
 
 export interface TeamSession {
   name: string; // tmux target in "session:window" form
@@ -10,6 +11,11 @@ export interface TeamSession {
 const INJECTION_MARKER = '[OMX_TMUX_INJECT]';
 const CODEX_BYPASS_FLAG = '--dangerously-bypass-approvals-and-sandbox';
 const MADMAX_FLAG = '--madmax';
+const CONFIG_FLAG = '-c';
+const LONG_CONFIG_FLAG = '--config';
+const MODEL_INSTRUCTIONS_FILE_KEY = 'model_instructions_file';
+const OMX_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV = 'OMX_BYPASS_DEFAULT_SYSTEM_PROMPT';
+const OMX_MODEL_INSTRUCTIONS_FILE_ENV = 'OMX_MODEL_INSTRUCTIONS_FILE';
 
 interface WorkerLaunchSpec {
   shell: string;
@@ -91,18 +97,61 @@ function buildWorkerLaunchSpec(shellPath: string | undefined): WorkerLaunchSpec 
   return { shell: '/bin/sh', rcFile: null };
 }
 
-function resolveWorkerLaunchArgs(extraArgs: string[] = []): string[] {
+function escapeTomlString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function isModelInstructionsOverride(value: string): boolean {
+  return new RegExp(`^${MODEL_INSTRUCTIONS_FILE_KEY}\\s*=`).test(value.trim());
+}
+
+function hasModelInstructionsOverride(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === CONFIG_FLAG || arg === LONG_CONFIG_FLAG) {
+      const maybeValue = args[i + 1];
+      if (typeof maybeValue === 'string' && isModelInstructionsOverride(maybeValue)) {
+        return true;
+      }
+      continue;
+    }
+    if (arg.startsWith(`${LONG_CONFIG_FLAG}=`)) {
+      const inlineValue = arg.slice(`${LONG_CONFIG_FLAG}=`.length);
+      if (isModelInstructionsOverride(inlineValue)) return true;
+    }
+  }
+  return false;
+}
+
+function shouldBypassDefaultSystemPrompt(env: NodeJS.ProcessEnv): boolean {
+  return env[OMX_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV] !== '0';
+}
+
+function buildModelInstructionsOverride(cwd: string, env: NodeJS.ProcessEnv): string {
+  const filePath = env[OMX_MODEL_INSTRUCTIONS_FILE_ENV] || join(cwd, 'AGENTS.md');
+  return `${MODEL_INSTRUCTIONS_FILE_KEY}="${escapeTomlString(filePath)}"`;
+}
+
+function resolveWorkerLaunchArgs(extraArgs: string[] = [], cwd: string = process.cwd(), env: NodeJS.ProcessEnv = process.env): string[] {
   const merged = [...extraArgs];
   const wantsBypass = process.argv.includes(CODEX_BYPASS_FLAG) || process.argv.includes(MADMAX_FLAG);
   if (wantsBypass && !merged.includes(CODEX_BYPASS_FLAG)) {
     merged.push(CODEX_BYPASS_FLAG);
   }
+  if (shouldBypassDefaultSystemPrompt(env) && !hasModelInstructionsOverride(merged)) {
+    merged.push(CONFIG_FLAG, buildModelInstructionsOverride(cwd, env));
+  }
   return merged;
 }
 
-export function buildWorkerStartupCommand(teamName: string, workerIndex: number, launchArgs: string[] = []): string {
+export function buildWorkerStartupCommand(
+  teamName: string,
+  workerIndex: number,
+  launchArgs: string[] = [],
+  cwd: string = process.cwd(),
+): string {
   const spec = buildWorkerLaunchSpec(process.env.SHELL);
-  const fullLaunchArgs = resolveWorkerLaunchArgs(launchArgs);
+  const fullLaunchArgs = resolveWorkerLaunchArgs(launchArgs, cwd);
   const codexArgs = fullLaunchArgs.map(shellQuoteSingle).join(' ');
   const codexInvocation = codexArgs.length > 0 ? `exec codex ${codexArgs}` : 'exec codex';
   const rcPrefix = spec.rcFile ? `if [ -f ${spec.rcFile} ]; then source ${spec.rcFile}; fi; ` : '';
@@ -174,7 +223,7 @@ export function createTeamSession(
   const workerPaneIds: string[] = [];
   let rightStackRootPaneId: string | null = null;
   for (let i = 1; i <= workerCount; i++) {
-    const cmd = buildWorkerStartupCommand(safeTeamName, i, workerLaunchArgs);
+    const cmd = buildWorkerStartupCommand(safeTeamName, i, workerLaunchArgs, cwd);
     // First split creates the right side from leader. Remaining splits stack on the right.
     const splitDirection = i === 1 ? '-h' : '-v';
     const splitTarget = i === 1 ? leaderPaneId : (rightStackRootPaneId ?? leaderPaneId);

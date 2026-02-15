@@ -112,7 +112,7 @@ The security-reviewer agent SHOULD consult Codex for cross-validation.
 ### Tool Usage
 Before first MCP tool use, call `ToolSearch("mcp")` to discover deferred MCP tools.
 Use `mcp__x__ask_codex` with `agent_role: "security-reviewer"`.
-If ToolSearch finds no MCP tools, fall back to the `security-reviewer` Claude agent.
+If ToolSearch finds no MCP tools, fall back to the `security-reviewer` agent.
 
 **Note:** Security second opinions are high-value. Consider consulting for CRITICAL/HIGH findings.
 

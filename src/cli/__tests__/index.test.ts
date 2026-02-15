@@ -8,6 +8,7 @@ import {
   upsertTopLevelTomlString,
   collectInheritableTeamWorkerArgs,
   resolveTeamWorkerLaunchArgsEnv,
+  injectModelInstructionsBypassArgs,
 } from '../index.js';
 
 describe('normalizeCodexLaunchArgs', () => {
@@ -152,6 +153,46 @@ describe('readTopLevelTomlString', () => {
       'model_reasoning_effort'
     );
     assert.equal(value, null);
+  });
+});
+
+describe('injectModelInstructionsBypassArgs', () => {
+  it('appends model_instructions_file override by default', () => {
+    const args = injectModelInstructionsBypassArgs('/tmp/my-project', ['--model', 'gpt-5'], {});
+    assert.deepEqual(
+      args,
+      ['--model', 'gpt-5', '-c', 'model_instructions_file="/tmp/my-project/AGENTS.md"']
+    );
+  });
+
+  it('does not append when bypass is disabled via env', () => {
+    const args = injectModelInstructionsBypassArgs(
+      '/tmp/my-project',
+      ['--model', 'gpt-5'],
+      { OMX_BYPASS_DEFAULT_SYSTEM_PROMPT: '0' }
+    );
+    assert.deepEqual(args, ['--model', 'gpt-5']);
+  });
+
+  it('does not append when model_instructions_file is already set', () => {
+    const args = injectModelInstructionsBypassArgs(
+      '/tmp/my-project',
+      ['-c', 'model_instructions_file="/tmp/custom.md"'],
+      {}
+    );
+    assert.deepEqual(args, ['-c', 'model_instructions_file="/tmp/custom.md"']);
+  });
+
+  it('respects OMX_MODEL_INSTRUCTIONS_FILE env override', () => {
+    const args = injectModelInstructionsBypassArgs(
+      '/tmp/my-project',
+      [],
+      { OMX_MODEL_INSTRUCTIONS_FILE: '/tmp/alt instructions.md' }
+    );
+    assert.deepEqual(
+      args,
+      ['-c', 'model_instructions_file="/tmp/alt instructions.md"']
+    );
   });
 });
 

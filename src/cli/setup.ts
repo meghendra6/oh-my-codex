@@ -3,7 +3,7 @@
  * Installs skills, prompts, MCP servers config, and AGENTS.md
  */
 
-import { mkdir, copyFile, readdir, readFile, writeFile, stat } from 'fs/promises';
+import { mkdir, copyFile, readdir, readFile, writeFile, stat, rm } from 'fs/promises';
 import { join, dirname } from 'path';
 import { existsSync } from 'fs';
 import { homedir } from 'os';
@@ -59,6 +59,17 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
   const promptsSrc = join(pkgRoot, 'prompts');
   const promptsDst = codexPromptsDir();
   const promptCount = await installDirectory(promptsSrc, promptsDst, '.md', { force, dryRun, verbose });
+  const cleanedLegacyPromptShims = await cleanupLegacySkillPromptShims(promptsSrc, promptsDst, {
+    dryRun,
+    verbose,
+  });
+  if (cleanedLegacyPromptShims > 0) {
+    if (dryRun) {
+      console.log(`  Would remove ${cleanedLegacyPromptShims} legacy skill prompt shim file(s).`);
+    } else {
+      console.log(`  Removed ${cleanedLegacyPromptShims} legacy skill prompt shim file(s).`);
+    }
+  }
   console.log(`  Installed ${promptCount} agent prompts.\n`);
 
   // Step 3: Install skills
@@ -144,6 +155,50 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
   if (isGitHubCliConfigured()) {
     console.log('\nSupport the project: gh repo star Yeachan-Heo/oh-my-codex');
   }
+}
+
+function isLegacySkillPromptShim(content: string): boolean {
+  const marker = /Read and follow the full skill instructions at\s+~\/\.agents\/skills\/[^/\s]+\/SKILL\.md/i;
+  return marker.test(content);
+}
+
+async function cleanupLegacySkillPromptShims(
+  promptsSrcDir: string,
+  promptsDstDir: string,
+  options: Pick<SetupOptions, 'dryRun' | 'verbose'>
+): Promise<number> {
+  if (!existsSync(promptsSrcDir) || !existsSync(promptsDstDir)) return 0;
+
+  const sourceFiles = new Set(
+    (await readdir(promptsSrcDir))
+      .filter(name => name.endsWith('.md'))
+  );
+
+  const installedFiles = await readdir(promptsDstDir);
+  let removed = 0;
+
+  for (const file of installedFiles) {
+    if (!file.endsWith('.md')) continue;
+    if (sourceFiles.has(file)) continue;
+
+    const fullPath = join(promptsDstDir, file);
+    let content = '';
+    try {
+      content = await readFile(fullPath, 'utf-8');
+    } catch {
+      continue;
+    }
+
+    if (!isLegacySkillPromptShim(content)) continue;
+
+    if (!options.dryRun) {
+      await rm(fullPath, { force: true });
+    }
+    if (options.verbose) console.log(`  removed legacy prompt shim ${file}`);
+    removed++;
+  }
+
+  return removed;
 }
 
 function isGitHubCliConfigured(): boolean {

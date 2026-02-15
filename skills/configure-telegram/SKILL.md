@@ -14,12 +14,12 @@ Set up Telegram notifications so OMX can message you when sessions end, need inp
 
 ## How This Skill Works
 
-This is an interactive, natural-language configuration skill. Walk the user through setup by asking questions with AskUserQuestion. Write the result to `~/.claude/.omx-config.json`.
+This is an interactive, natural-language configuration skill. Walk the user through setup by asking questions with AskUserQuestion. Write the result to `~/.codex/.omx-config.json`.
 
 ## Step 1: Detect Existing Configuration
 
 ```bash
-CONFIG_FILE="$HOME/.claude/.omx-config.json"
+CONFIG_FILE="$HOME/.codex/.omx-config.json"
 
 if [ -f "$CONFIG_FILE" ]; then
   HAS_TELEGRAM=$(jq -r '.notifications.telegram.enabled // false' "$CONFIG_FILE" 2>/dev/null)
@@ -110,8 +110,8 @@ Use AskUserQuestion with multiSelect:
 **Question:** "Which events should trigger Telegram notifications?"
 
 **Options (multiSelect: true):**
-1. **Session end (Recommended)** - When a Claude session finishes
-2. **Input needed** - When Claude is waiting for your response (great for long-running tasks)
+1. **Session end (Recommended)** - When a Codex session finishes
+2. **Input needed** - When Codex is waiting for your response (great for long-running tasks)
 3. **Session start** - When a new session begins
 4. **Session continuing** - When a persistent mode keeps the session alive
 
@@ -122,7 +122,7 @@ Default selection: session-end + ask-user-question.
 Read the existing config, merge the new Telegram settings, and write back:
 
 ```bash
-CONFIG_FILE="$HOME/.claude/.omx-config.json"
+CONFIG_FILE="$HOME/.codex/.omx-config.json"
 mkdir -p "$(dirname "$CONFIG_FILE")"
 
 if [ -f "$CONFIG_FILE" ]; then
@@ -210,7 +210,7 @@ Telegram Notifications Configured!
   Format:     Markdown
   Events:     session-end, ask-user-question
 
-Config saved to: ~/.claude/.omx-config.json
+Config saved to: ~/.codex/.omx-config.json
 
 You can also set these via environment variables:
   OMX_TELEGRAM_BOT_TOKEN=123456789:ABCdefGHI...

@@ -77,7 +77,7 @@ Analyze your oh-my-codex usage and get tailored recommendations to improve your 
 # Check for token tracking data
 TOKEN_FILE="$HOME/.omx/state/token-tracking.jsonl"
 SESSION_FILE=".omx/state/session-history.json"
-CONFIG_FILE="$HOME/.claude/.omx-config.json"
+CONFIG_FILE="$HOME/.codex/.omx-config.json"
 
 echo "Analyzing OMX Usage..."
 echo ""

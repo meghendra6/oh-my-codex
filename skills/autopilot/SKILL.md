@@ -136,22 +136,17 @@ Why bad: This is an exploration/brainstorming request. Respond conversationally 
 <Advanced>
 ## Configuration
 
-Optional settings in `.claude/settings.json`:
+Optional settings in `~/.codex/config.toml`:
 
-```json
-{
-  "omc": {
-    "autopilot": {
-      "maxIterations": 10,
-      "maxQaCycles": 5,
-      "maxValidationRounds": 3,
-      "pauseAfterExpansion": false,
-      "pauseAfterPlanning": false,
-      "skipQa": false,
-      "skipValidation": false
-    }
-  }
-}
+```toml
+[omc.autopilot]
+maxIterations = 10
+maxQaCycles = 5
+maxValidationRounds = 3
+pauseAfterExpansion = false
+pauseAfterPlanning = false
+skipQa = false
+skipValidation = false
 ```
 
 ## Resume

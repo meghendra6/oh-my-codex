@@ -25,23 +25,31 @@ omx setup
 oh-my-codex setup
 =================
 
-[1/6] Creating directories...
+[1/7] Creating directories...
   Done.
 
-[2/6] Installing agent prompts...
+[2/7] Installing agent prompts...
   Installed 30 agent prompts.
 
-[3/6] Installing skills...
-  Installed 39 skills.
+[3/7] Installing skills...
+  Installed 40 skills.
 
-[4/6] Updating config.toml...
+[4/7] Updating config.toml...
   Done.
 
-[5/6] Generating AGENTS.md...
+[4.5/7] Verifying Team MCP comm tools...
+  omx_state exports: team_send_message, team_broadcast, team_mailbox_list, team_mailbox_mark_delivered
+
+[5/7] Generating AGENTS.md...
   Generated AGENTS.md in project root.
+  # (or: AGENTS.md already exists, use --force to overwrite)
 
-[6/6] Configuring notification hook...
+[6/7] Configuring notification hook...
   Done.
+
+[7/7] Configuring HUD...
+  HUD config created (preset: focused).
+  StatusLine configured in config.toml via [tui] section.
 
 Setup complete! Run "omx doctor" to verify installation.
 ```
@@ -62,10 +70,10 @@ oh-my-codex doctor
   [OK] Codex home: ~/.codex
   [OK] Config: config.toml has OMX entries
   [OK] Prompts: 30 agent prompts installed
-  [OK] Skills: 39 skills installed
+  [OK] Skills: 40 skills installed
   [OK] AGENTS.md: found in project root
   [OK] State dir: .omx/state
-  [OK] MCP Servers: 2 servers configured (OMX present)
+  [OK] MCP Servers: 4 servers configured (OMX present)
 
 Results: 9 passed, 0 warnings, 0 failed
 ```
@@ -75,7 +83,7 @@ Results: 9 passed, 0 warnings, 0 failed
 Start Codex CLI in any project directory:
 
 ```bash
-codex
+omx
 ```
 
 Then use agent slash commands:
@@ -103,9 +111,9 @@ Then use agent slash commands:
 The generated `AGENTS.md` in your project root acts as the orchestration brain. It provides:
 
 - Delegation rules (when to use which agent)
-- Model routing (haiku for quick lookups, sonnet for implementation, opus for architecture)
+- Model routing guidance in AGENTS.md (complexity/role-based routing)
 - 30-agent catalog with descriptions
-- 39 skill descriptions with trigger patterns
+- 40 skill descriptions with trigger patterns
 - Team compositions for common workflows
 - Verification protocols
 
@@ -126,16 +134,13 @@ omx cancel
 
 **Expected output for `omx version`:**
 ```
-oh-my-codex v0.1.0
+oh-my-codex vX.Y.Z
 Node.js v20+
 Platform: linux x64
 ```
 
 **Expected output for `omx status` (no active modes):**
 ```
-oh-my-codex status
-==================
-
 No active modes.
 ```
 
@@ -172,9 +177,9 @@ The MCP servers are configured in `config.toml` and provide state/memory tools t
 | Component | Count | Location |
 |-----------|-------|----------|
 | Agent prompts | 30 | `~/.codex/prompts/*.md` |
-| Skills | 39 | `~/.agents/skills/*/SKILL.md` |
-| MCP servers | 2 | Configured in `~/.codex/config.toml` |
-| CLI commands | 6 | `omx setup/doctor/version/status/cancel/help` |
+| Skills | 40 | `~/.agents/skills/*/SKILL.md` |
+| MCP servers | 4 | Configured in `~/.codex/config.toml` |
+| CLI commands | 11+ | `omx (launch), setup, doctor, team, version, tmux-hook, hud, status, cancel, reasoning, help` |
 | AGENTS.md | 1 | Project root (generated) |
 
 ## Troubleshooting
@@ -183,6 +188,6 @@ The MCP servers are configured in `config.toml` and provide state/memory tools t
 
 **Slash commands not appearing:** Run `omx setup --force` to reinstall prompts
 
-**MCP servers not connecting:** Check `~/.codex/config.toml` for `[mcp_servers.omx_state]` and `[mcp_servers.omx_memory]` entries
+**MCP servers not connecting:** Check `~/.codex/config.toml` for `[mcp_servers.omx_state]`, `[mcp_servers.omx_memory]`, `[mcp_servers.omx_code_intel]`, and `[mcp_servers.omx_trace]` entries
 
 **Doctor shows warnings:** Run `omx setup` to install missing components

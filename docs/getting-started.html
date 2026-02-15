@@ -33,14 +33,25 @@
 omx setup
 omx doctor</code></pre>
 
+      <h2>Recommended Launch</h2>
+      <pre><code>omx --xhigh --madmax   # trusted environments
+omx                    # standard launch</code></pre>
+
       <h2>First Run Walkthrough</h2>
       <ol>
         <li>Create or enter a project directory.</li>
         <li>Run <code>omx setup</code> to install prompts, skills, AGENTS.md, and configuration.</li>
-        <li>Start Codex CLI with <code>codex</code>.</li>
+        <li>Start Codex CLI with <code>omx</code>.</li>
         <li>Try an agent prompt: <code>/prompts:architect "analyze auth module"</code>.</li>
-        <li>Try a workflow skill: <code>$team "fix all TypeScript errors"</code>.</li>
+        <li>Try a workflow skill: <code>$team 3:executor "fix all TypeScript errors"</code>.</li>
       </ol>
+
+      <h2>Prompt Instruction Source</h2>
+      <p>OMX layers project instructions by default (extends Codex behavior, does not replace/bypass Codex core system policies):</p>
+      <pre><code>-c model_instructions_file="&lt;cwd&gt;/AGENTS.md"</code></pre>
+      <p>Override behavior when needed:</p>
+      <pre><code>OMX_BYPASS_DEFAULT_SYSTEM_PROMPT=0 omx
+OMX_MODEL_INSTRUCTIONS_FILE=/path/to/instructions.md omx</code></pre>
 
       <h2>Troubleshooting</h2>
       <table>

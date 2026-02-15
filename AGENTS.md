@@ -29,19 +29,19 @@ For non-trivial SDK/API/framework usage, delegate to `dependency-expert` to chec
 
 <child_agent_protocol>
 Codex CLI spawns child agents via the `spawn_agent` tool (requires `collab = true`).
-To inject role-specific behavior, the parent MUST read the agent prompt and pass it as instructions.
+To inject role-specific behavior, the parent MUST read the role prompt and pass it in the spawned agent message.
 
 Delegation steps:
 1. Decide which agent role to delegate to (e.g., `architect`, `executor`, `debugger`)
 2. Read the role prompt: `~/.codex/prompts/{role}.md`
-3. Call `spawn_agent` with the prompt content + task description as instructions
+3. Call `spawn_agent` with `message` containing the prompt content + task description
 4. The child agent receives full role context and executes the task independently
 
 Parallel delegation (up to 6 concurrent):
 ```
-spawn_agent(instructions: [architect prompt] + "Review the auth module")
-spawn_agent(instructions: [executor prompt] + "Add input validation to login")
-spawn_agent(instructions: [test-engineer prompt] + "Write tests for the auth changes")
+spawn_agent(message: "<architect prompt>\n\nTask: Review the auth module")
+spawn_agent(message: "<executor prompt>\n\nTask: Add input validation to login")
+spawn_agent(message: "<test-engineer prompt>\n\nTask: Write tests for the auth changes")
 ```
 
 Each child agent:
@@ -74,7 +74,7 @@ Match agent role to task complexity:
 - **High complexity** (architecture, deep analysis, complex refactors): `architect`, `deep-executor`, `critic`
 
 For interactive use: `/prompts:name` (e.g., `/prompts:architect "review auth"`)
-For child agent delegation: follow `<child_agent_protocol>` — read prompt file, pass to `spawn_agent`
+For child agent delegation: follow `<child_agent_protocol>` — read prompt file, pass it in `spawn_agent.message`
 For workflow skills: `$name` (e.g., `$ralph "fix all tests"`)
 </model_routing>
 
@@ -282,10 +282,42 @@ oh-my-codex uses the `.omx/` directory for persistent state:
 - `.omx/plans/` -- Planning documents
 - `.omx/logs/` -- Audit logs
 
-State tools are available via MCP when configured:
-- `state_read`, `state_write`, `state_clear`, `state_list_active`
-- `project_memory_read`, `project_memory_write`, `project_memory_add_note`
-- `notepad_read`, `notepad_write_priority`, `notepad_write_working`, `notepad_write_manual`
+Tools are available via MCP when configured (`omx setup` registers all servers):
+
+State & Memory:
+- `state_read`, `state_write`, `state_clear`, `state_list_active`, `state_get_status`
+- `project_memory_read`, `project_memory_write`, `project_memory_add_note`, `project_memory_add_directive`
+- `notepad_read`, `notepad_write_priority`, `notepad_write_working`, `notepad_write_manual`, `notepad_prune`, `notepad_stats`
+
+Code Intelligence:
+- `lsp_diagnostics` -- type errors for a single file (tsc --noEmit)
+- `lsp_diagnostics_directory` -- project-wide type checking
+- `lsp_document_symbols` -- function/class/variable outline for a file
+- `lsp_workspace_symbols` -- search symbols by name across the workspace
+- `lsp_hover` -- type info at a position (regex-based approximation)
+- `lsp_find_references` -- find all references to a symbol (grep-based)
+- `lsp_servers` -- list available diagnostic backends
+- `ast_grep_search` -- structural code pattern search (requires ast-grep CLI)
+- `ast_grep_replace` -- structural code transformation (dryRun=true by default)
+
+Trace:
+- `trace_timeline` -- chronological agent turn + mode event timeline
+- `trace_summary` -- aggregate statistics (turn counts, timing, token usage)
+
+Mode lifecycle requirements:
+- On mode start, call `state_write` with `mode`, `active: true`, `started_at`, and mode-specific fields.
+- On phase/iteration transitions, call `state_write` with updated `current_phase` / `iteration` and mode-specific progress fields.
+- On completion, call `state_write` with `active: false`, terminal `current_phase`, and `completed_at`.
+- On cancel/abort cleanup, call `state_clear(mode="<mode>")`.
+
+Recommended mode fields:
+- `ralph`: `active`, `iteration`, `max_iterations`, `current_phase`, `started_at`, `completed_at`
+- `autopilot`: `active`, `current_phase` (`expansion|planning|execution|qa|validation|complete`), `started_at`, `completed_at`
+- `ultrawork`: `active`, `reinforcement_count`, `started_at`
+- `team`: `active`, `current_phase` (`team-plan|team-prd|team-exec|team-verify|team-fix|complete`), `agent_count`, `team_name`
+- `ecomode`: `active`
+- `pipeline`: `active`, `current_phase`, `started_at`, `completed_at`
+- `ultraqa`: `active`, `current_phase`, `iteration`, `started_at`, `completed_at`
 </state_management>
 
 ---
@@ -293,3 +325,15 @@ State tools are available via MCP when configured:
 ## Setup
 
 Run `omx setup` to install all components. Run `omx doctor` to verify installation.
+
+<!-- OMX:RUNTIME:START -->
+<session_context>
+**Session:** omx-1771139412053-oxxw4c | 2026-02-15T07:10:12.055Z
+
+**Compaction Protocol:**
+Before context compaction, preserve critical state:
+1. Write progress checkpoint via state_write MCP tool
+2. Save key decisions to notepad via notepad_write_working
+3. If context is >80% full, proactively checkpoint state
+</session_context>
+<!-- OMX:RUNTIME:END -->
