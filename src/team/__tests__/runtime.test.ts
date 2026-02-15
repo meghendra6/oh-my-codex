@@ -14,7 +14,16 @@ import {
   writeAtomic,
   readTask,
 } from '../state.js';
-import { monitorTeam, shutdownTeam, resumeTeam, startTeam, assignTask, sendWorkerMessage } from '../runtime.js';
+import {
+  monitorTeam,
+  shutdownTeam,
+  resumeTeam,
+  startTeam,
+  assignTask,
+  sendWorkerMessage,
+  resolveWorkerLaunchArgsFromEnv,
+  TEAM_LOW_COMPLEXITY_DEFAULT_MODEL,
+} from '../runtime.js';
 
 function withEmptyPath<T>(fn: () => T): T {
   const prev = process.env.PATH;
@@ -27,7 +36,52 @@ function withEmptyPath<T>(fn: () => T): T {
   }
 }
 
+function withoutTeamWorkerEnv<T>(fn: () => T): T {
+  const prev = process.env.OMX_TEAM_WORKER;
+  delete process.env.OMX_TEAM_WORKER;
+  try {
+    return fn();
+  } finally {
+    if (typeof prev === 'string') process.env.OMX_TEAM_WORKER = prev;
+  }
+}
+
 describe('runtime', () => {
+  it('resolveWorkerLaunchArgsFromEnv injects low-complexity default model when missing', () => {
+    const args = resolveWorkerLaunchArgsFromEnv(
+      { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+      'explore',
+    );
+    assert.deepEqual(args, ['--no-alt-screen', '--model', TEAM_LOW_COMPLEXITY_DEFAULT_MODEL]);
+  });
+
+  it('resolveWorkerLaunchArgsFromEnv does not inject default model for non-low agentType', () => {
+    const args = resolveWorkerLaunchArgsFromEnv(
+      { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+      'executor',
+    );
+    assert.deepEqual(args, ['--no-alt-screen']);
+  });
+
+  it('resolveWorkerLaunchArgsFromEnv treats *-low aliases as low complexity', () => {
+    const args = resolveWorkerLaunchArgsFromEnv(
+      { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+      'executor-low',
+    );
+    assert.deepEqual(args, ['--no-alt-screen', '--model', TEAM_LOW_COMPLEXITY_DEFAULT_MODEL]);
+  });
+
+  it('resolveWorkerLaunchArgsFromEnv preserves explicit model in either syntax', () => {
+    assert.deepEqual(
+      resolveWorkerLaunchArgsFromEnv({ OMX_TEAM_WORKER_LAUNCH_ARGS: '--model gpt-5' }, 'explore'),
+      ['--model', 'gpt-5'],
+    );
+    assert.deepEqual(
+      resolveWorkerLaunchArgsFromEnv({ OMX_TEAM_WORKER_LAUNCH_ARGS: '--model=gpt-5.3' }, 'explore'),
+      ['--model=gpt-5.3'],
+    );
+  });
+
   it('startTeam rejects nested team invocation inside worker context', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-'));
     const prev = process.env.OMX_TEAM_WORKER;
@@ -48,10 +102,10 @@ describe('runtime', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-'));
     try {
       await assert.rejects(
-        () =>
+        () => withoutTeamWorkerEnv(() =>
           withEmptyPath(() =>
             startTeam('team-a', 'task', 'executor', 1, [{ subject: 's', description: 'd' }], cwd),
-          ),
+          )),
         /requires tmux/i,
       );
     } finally {
