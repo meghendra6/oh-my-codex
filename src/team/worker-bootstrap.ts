@@ -93,6 +93,49 @@ function stripOverlayFromContent(content: string): string {
   return before + (after ? '\n\n' + after : '') + '\n';
 }
 
+/**
+ * Write a team-scoped model instructions file that composes the project's
+ * AGENTS.md (if any) with the worker overlay. This avoids mutating the
+ * project's AGENTS.md directly.
+ *
+ * Returns the absolute path to the composed file.
+ */
+export async function writeTeamWorkerInstructionsFile(
+  teamName: string,
+  cwd: string,
+  overlay: string,
+): Promise<string> {
+  const projectAgentsPath = join(cwd, 'AGENTS.md');
+  let base = '';
+  try {
+    base = await readFile(projectAgentsPath, 'utf-8');
+    // Strip any stale overlays from the base content
+    base = stripOverlayFromContent(base);
+  } catch {
+    // No project AGENTS.md -- compose with overlay only
+  }
+
+  const composed = base.trim().length > 0
+    ? `${base.trimEnd()}\n\n${overlay}\n`
+    : `${overlay}\n`;
+
+  const outPath = join(cwd, '.omx', 'state', 'team', teamName, 'worker-agents.md');
+  await mkdir(dirname(outPath), { recursive: true });
+  await writeFile(outPath, composed);
+  return outPath;
+}
+
+/**
+ * Remove the team-scoped model instructions file.
+ */
+export async function removeTeamWorkerInstructionsFile(
+  teamName: string,
+  cwd: string,
+): Promise<void> {
+  const outPath = join(cwd, '.omx', 'state', 'team', teamName, 'worker-agents.md');
+  await rm(outPath, { force: true }).catch(() => {});
+}
+
 function lockPathFor(agentsMdPath: string): string {
   return join(dirname(agentsMdPath), ...AGENTS_LOCK_PATH);
 }

@@ -55,8 +55,8 @@ import {
 } from './mcp-comm.js';
 import {
   generateWorkerOverlay,
-  applyWorkerOverlay,
-  stripWorkerOverlay,
+  writeTeamWorkerInstructionsFile,
+  removeTeamWorkerInstructionsFile,
   generateInitialInbox,
   generateTaskAssignmentInbox,
   generateShutdownInbox,
@@ -106,7 +106,9 @@ interface ShutdownOptions {
 }
 
 const MODEL_FLAG = '--model';
+const MODEL_INSTRUCTIONS_FILE_ENV = 'OMX_MODEL_INSTRUCTIONS_FILE';
 export const TEAM_LOW_COMPLEXITY_DEFAULT_MODEL = 'gpt-5.3-codex-spark';
+const previousModelInstructionsFileByTeam = new Map<string, string | undefined>();
 
 function resolveWorkerReadyTimeoutMs(env: NodeJS.ProcessEnv): number {
   const raw = env.OMX_TEAM_READY_TIMEOUT_MS;
@@ -142,6 +144,26 @@ function isLowComplexityAgentType(agentType: string): boolean {
   const agent = getAgent(agentType);
   if (agent?.model === 'haiku') return true;
   return /-low$/i.test(agentType);
+}
+
+function setTeamModelInstructionsFile(teamName: string, filePath: string): void {
+  if (!previousModelInstructionsFileByTeam.has(teamName)) {
+    previousModelInstructionsFileByTeam.set(teamName, process.env[MODEL_INSTRUCTIONS_FILE_ENV]);
+  }
+  process.env[MODEL_INSTRUCTIONS_FILE_ENV] = filePath;
+}
+
+function restoreTeamModelInstructionsFile(teamName: string): void {
+  if (!previousModelInstructionsFileByTeam.has(teamName)) return;
+
+  const previous = previousModelInstructionsFileByTeam.get(teamName);
+  previousModelInstructionsFileByTeam.delete(teamName);
+
+  if (typeof previous === 'string') {
+    process.env[MODEL_INSTRUCTIONS_FILE_ENV] = previous;
+    return;
+  }
+  delete process.env[MODEL_INSTRUCTIONS_FILE_ENV];
 }
 
 export function resolveWorkerLaunchArgsFromEnv(env: NodeJS.ProcessEnv, agentType: string): string[] {
@@ -195,9 +217,8 @@ export async function startTeam(
   // 2. Sanitize team name
   const sanitized = sanitizeTeamName(teamName);
   let sessionName = `omx-team-${sanitized}`;
-  const agentsMdPath = join(cwd, 'AGENTS.md');
   const overlay = generateWorkerOverlay(sanitized);
-  let overlayApplied = false;
+  let workerInstructionsPath: string | null = null;
   let sessionCreated = false;
   const createdWorkerPaneIds: string[] = [];
   const workerLaunchArgs = resolveWorkerLaunchArgsFromEnv(process.env, agentType);
@@ -227,9 +248,9 @@ export async function startTeam(
       }, cwd);
     }
 
-    // 5. Apply generic AGENTS.md overlay
-    await applyWorkerOverlay(agentsMdPath, overlay);
-    overlayApplied = true;
+    // 5. Write team-scoped worker instructions file (no mutation of project AGENTS.md)
+    workerInstructionsPath = await writeTeamWorkerInstructionsFile(sanitized, cwd, overlay);
+    setTeamModelInstructionsFile(sanitized, workerInstructionsPath);
 
     // 6. Create tmux session with workers
     const createdSession = createTeamSession(sanitized, workerCount, cwd, workerLaunchArgs);
@@ -316,13 +337,14 @@ export async function startTeam(
       }
     }
 
-    if (overlayApplied) {
+    if (workerInstructionsPath) {
       try {
-        await stripWorkerOverlay(agentsMdPath);
+        await removeTeamWorkerInstructionsFile(sanitized, cwd);
       } catch (cleanupError) {
-        rollbackErrors.push(`stripWorkerOverlay: ${String(cleanupError)}`);
+        rollbackErrors.push(`removeTeamWorkerInstructionsFile: ${String(cleanupError)}`);
       }
     }
+    restoreTeamModelInstructionsFile(sanitized);
 
     try {
       await cleanupTeamState(sanitized, cwd);
@@ -567,6 +589,7 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     // No config -- just try to kill tmux session and clean up
     try { destroyTeamSession(`omx-team-${sanitized}`); } catch { /* ignore */ }
     await cleanupTeamState(sanitized, cwd);
+    restoreTeamModelInstructionsFile(sanitized);
     return;
   }
 
@@ -638,9 +661,9 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     try { destroyTeamSession(sessionName); } catch { /* ignore */ }
   }
 
-  // 5. Strip AGENTS.md overlay
-  const agentsMdPath = join(cwd, 'AGENTS.md');
-  try { await stripWorkerOverlay(agentsMdPath); } catch { /* ignore */ }
+  // 5. Remove team-scoped worker instructions file (no mutation of project AGENTS.md)
+  try { await removeTeamWorkerInstructionsFile(sanitized, cwd); } catch { /* ignore */ }
+  restoreTeamModelInstructionsFile(sanitized);
 
   // 6. Cleanup state
   await cleanupTeamState(sanitized, cwd);

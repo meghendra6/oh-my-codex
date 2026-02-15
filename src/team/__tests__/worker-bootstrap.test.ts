@@ -7,6 +7,8 @@ import {
   generateWorkerOverlay,
   applyWorkerOverlay,
   stripWorkerOverlay,
+  writeTeamWorkerInstructionsFile,
+  removeTeamWorkerInstructionsFile,
   generateInitialInbox,
   generateTaskAssignmentInbox,
   generateShutdownInbox,
@@ -234,5 +236,66 @@ describe('worker bootstrap', () => {
     const message = generateMailboxTriggerMessage('worker-2', 'team-mail', 3);
     assert.match(message, /3 new message/);
     assert.match(message, /\.omx\/state\/team\/team-mail\/mailbox\/worker-2\.json/);
+  });
+
+  it('writeTeamWorkerInstructionsFile composes base AGENTS.md with overlay', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-worker-bootstrap-'));
+    try {
+      await writeFile(join(cwd, 'AGENTS.md'), '# Project Instructions\n\nDo good work.\n', 'utf8');
+
+      const overlay = generateWorkerOverlay('compose-team');
+      const outPath = await writeTeamWorkerInstructionsFile('compose-team', cwd, overlay);
+
+      const content = await readFile(outPath, 'utf8');
+      assert.match(content, /# Project Instructions/);
+      assert.match(content, /Do good work/);
+      assert.match(content, /<!-- OMX:TEAM:WORKER:START -->/);
+      assert.match(content, /<!-- OMX:TEAM:WORKER:END -->/);
+
+      // Verify project AGENTS.md was NOT modified
+      const projectContent = await readFile(join(cwd, 'AGENTS.md'), 'utf8');
+      assert.doesNotMatch(projectContent, /<!-- OMX:TEAM:WORKER:START -->/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('writeTeamWorkerInstructionsFile works without project AGENTS.md', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-worker-bootstrap-'));
+    try {
+      const overlay = generateWorkerOverlay('no-agents-team');
+      const outPath = await writeTeamWorkerInstructionsFile('no-agents-team', cwd, overlay);
+
+      const content = await readFile(outPath, 'utf8');
+      assert.match(content, /<!-- OMX:TEAM:WORKER:START -->/);
+      assert.match(content, /team "no-agents-team"/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('removeTeamWorkerInstructionsFile cleans up the file', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-worker-bootstrap-'));
+    try {
+      const overlay = generateWorkerOverlay('cleanup-team');
+      await writeTeamWorkerInstructionsFile('cleanup-team', cwd, overlay);
+      await removeTeamWorkerInstructionsFile('cleanup-team', cwd);
+
+      const { existsSync } = await import('fs');
+      const outPath = join(cwd, '.omx', 'state', 'team', 'cleanup-team', 'worker-agents.md');
+      assert.equal(existsSync(outPath), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('removeTeamWorkerInstructionsFile is safe to call when file does not exist', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-worker-bootstrap-'));
+    try {
+      // Should not throw
+      await removeTeamWorkerInstructionsFile('nonexistent-team', cwd);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
   });
 });

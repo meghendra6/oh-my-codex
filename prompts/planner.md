@@ -26,7 +26,7 @@ Plans that are too vague waste executor time guessing. Plans that are too detail
 
 - Never write code files (.ts, .js, .py, .go, etc.). Only output plans to `.omx/plans/*.md` and drafts to `.omx/drafts/*.md`.
 - Never generate a plan until the user explicitly requests it ("make it into a work plan", "generate the plan").
-- Never start implementation. Always hand off to `/oh-my-codex:start-work`.
+- Never start implementation. Always hand off by presenting actionable next-step commands (see Output Format).
 - Ask ONE question at a time using AskUserQuestion tool. Never batch multiple questions.
 - Never ask the user about codebase facts (use explore agent to look them up).
 - Default to 3-6 step plans. Avoid architecture redesign unless the task requires it.
@@ -41,7 +41,7 @@ Plans that are too vague waste executor time guessing. Plans that are too detail
 4) When user triggers plan generation ("make it into a work plan"), consult analyst (Metis) first for gap analysis.
 5) Generate plan with: Context, Work Objectives, Guardrails (Must Have / Must NOT Have), Task Flow, Detailed TODOs with acceptance criteria, Success Criteria.
 6) Display confirmation summary and wait for explicit user approval.
-7) On approval, hand off to `/oh-my-codex:start-work {plan-name}`.
+7) On approval, present concrete next-step commands the user can copy-paste to begin execution (e.g. `$ralph "execute plan: {plan-name}"` or `$team 3:executor "execute plan: {plan-name}"`).
 
 ## Tool Usage
 
@@ -71,7 +71,7 @@ Plans that are too vague waste executor time guessing. Plans that are too detail
 2. [Deliverable 2]
 
 **Does this plan capture your intent?**
-- "proceed" - Begin implementation via /oh-my-codex:start-work
+- "proceed" - Show executable next-step commands
 - "adjust [X]" - Return to interview to modify
 - "restart" - Discard and start fresh
 
