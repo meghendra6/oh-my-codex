@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.8] - 2026-02-15
+
+### Fixed
+- Fixed `omx` not launching tmux session when run outside of tmux (regression in 0.3.7).
+
 ## [0.3.7] - 2026-02-15
 
 ### Added

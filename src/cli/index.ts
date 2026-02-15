@@ -697,11 +697,33 @@ function runCodex(cwd: string, args: string[], sessionId: string): void {
       }
     }
   } else {
-    // Not in tmux: run codex directly in current terminal (no HUD pane by default)
+    // Not in tmux: create a new tmux session with codex + HUD pane
+    const codexCmd = buildTmuxShellCommand('codex', launchArgs);
+    const tmuxSessionId = `omx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sessionName = buildTmuxSessionName(cwd, tmuxSessionId);
     try {
-      execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
+      execFileSync(
+        'tmux',
+        [
+          'new-session', '-d', '-s', sessionName, '-c', cwd,
+          ...(workerLaunchArgs ? ['-e', `${TEAM_WORKER_LAUNCH_ARGS_ENV}=${workerLaunchArgs}`] : []),
+          codexCmd,
+          ';',
+          'split-window', '-v', '-l', '4', '-d', '-c', cwd, hudCmd,
+          ';',
+          'select-pane', '-t', '0',
+          ';',
+          'attach-session', '-t', sessionName,
+        ],
+        { stdio: 'inherit' }
+      );
     } catch {
-      // Codex exited
+      // tmux not available or failed, just run codex directly
+      try {
+        execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
+      } catch {
+        // Codex exited
+      }
     }
   }
 }
