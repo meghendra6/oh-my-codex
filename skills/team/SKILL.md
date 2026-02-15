@@ -63,7 +63,9 @@ If duplicates exist, remove extras before `omx team` to prevent HUD ending up in
    - `.omx/state/team/<team>/config.json`
    - `.omx/state/team/<team>/manifest.v2.json`
    - `.omx/state/team/<team>/tasks/task-<id>.json`
-4. Apply worker overlay to project `AGENTS.md`
+4. Compose team-scoped worker instructions file at:
+   - `.omx/state/team/<team>/worker-agents.md`
+   - Uses project `AGENTS.md` content (if present) + worker overlay, without mutating project `AGENTS.md`
 5. Split current tmux window into worker panes
 6. Launch workers with `OMX_TEAM_WORKER=<team>/worker-<n>`
 7. Wait for worker readiness (`capture-pane` polling)
