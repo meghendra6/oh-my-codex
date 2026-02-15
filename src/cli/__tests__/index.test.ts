@@ -194,6 +194,19 @@ describe('injectModelInstructionsBypassArgs', () => {
       ['-c', 'model_instructions_file="/tmp/alt instructions.md"']
     );
   });
+
+  it('uses session-scoped default model_instructions_file when provided', () => {
+    const args = injectModelInstructionsBypassArgs(
+      '/tmp/my-project',
+      ['--model', 'gpt-5'],
+      {},
+      '/tmp/my-project/.omx/state/sessions/session-1/AGENTS.md'
+    );
+    assert.deepEqual(
+      args,
+      ['--model', 'gpt-5', '-c', 'model_instructions_file="/tmp/my-project/.omx/state/sessions/session-1/AGENTS.md"']
+    );
+  });
 });
 
 describe('upsertTopLevelTomlString', () => {

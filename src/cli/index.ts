@@ -14,7 +14,12 @@ import { hudCommand } from '../hud/index.js';
 import { teamCommand } from './team.js';
 import { getAllScopedStateDirs, getBaseStateDir, getStateDir } from '../mcp/state-paths.js';
 import { maybeCheckAndPromptUpdate } from './update.js';
-import { generateOverlay, applyOverlay, stripOverlay } from '../hooks/agents-overlay.js';
+import {
+  generateOverlay,
+  writeSessionModelInstructionsFile,
+  removeSessionModelInstructionsFile,
+  sessionModelInstructionsPath,
+} from '../hooks/agents-overlay.js';
 import {
   readSessionState, isSessionStale, writeSessionStart, writeSessionEnd, resetSessionMetrics,
 } from '../hooks/session.js';
@@ -224,7 +229,7 @@ async function launchWithHud(args: string[]): Promise<void> {
 
   // ── Phase 2: run ────────────────────────────────────────────────────────
   try {
-    runCodex(cwd, normalizedArgs);
+    runCodex(cwd, normalizedArgs, sessionId);
   } finally {
     // ── Phase 3: postLaunch ─────────────────────────────────────────────
     await postLaunch(cwd, sessionId);
@@ -307,15 +312,20 @@ function shouldBypassDefaultSystemPrompt(env: NodeJS.ProcessEnv): boolean {
   return env[OMX_BYPASS_DEFAULT_SYSTEM_PROMPT_ENV] !== '0';
 }
 
-function buildModelInstructionsOverride(cwd: string, env: NodeJS.ProcessEnv): string {
-  const filePath = env[OMX_MODEL_INSTRUCTIONS_FILE_ENV] || join(cwd, 'AGENTS.md');
+function buildModelInstructionsOverride(cwd: string, env: NodeJS.ProcessEnv, defaultFilePath?: string): string {
+  const filePath = env[OMX_MODEL_INSTRUCTIONS_FILE_ENV] || defaultFilePath || join(cwd, 'AGENTS.md');
   return `${MODEL_INSTRUCTIONS_FILE_KEY}="${escapeTomlString(filePath)}"`;
 }
 
-export function injectModelInstructionsBypassArgs(cwd: string, args: string[], env: NodeJS.ProcessEnv = process.env): string[] {
+export function injectModelInstructionsBypassArgs(
+  cwd: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+  defaultFilePath?: string,
+): string[] {
   if (!shouldBypassDefaultSystemPrompt(env)) return [...args];
   if (hasModelInstructionsOverride(args)) return [...args];
-  return [...args, CONFIG_FLAG, buildModelInstructionsOverride(cwd, env)];
+  return [...args, CONFIG_FLAG, buildModelInstructionsOverride(cwd, env, defaultFilePath)];
 }
 
 function splitWorkerLaunchArgs(raw: string | undefined): string[] {
@@ -491,23 +501,21 @@ export function buildTmuxSessionName(cwd: string, sessionId: string): string {
 /**
  * preLaunch: Prepare environment before Codex starts.
  * 1. Orphan cleanup (stale session from a crashed launch)
- * 2. Generate + apply AGENTS.md overlay
+ * 2. Generate runtime overlay + write session-scoped model instructions file
  * 3. Write session.json
  */
 async function preLaunch(cwd: string, sessionId: string): Promise<void> {
   // 1. Orphan cleanup
   const existingSession = await readSessionState(cwd);
   if (existingSession && isSessionStale(existingSession)) {
-    const agentsMdPath = join(cwd, 'AGENTS.md');
-    try { await stripOverlay(agentsMdPath, cwd); } catch { /* best effort */ }
+    try { await removeSessionModelInstructionsFile(cwd, existingSession.session_id); } catch { /* best effort */ }
     const { unlink } = await import('fs/promises');
     try { await unlink(join(cwd, '.omx', 'state', 'session.json')); } catch { /* best effort */ }
   }
 
-  // 2. Generate + apply AGENTS.md overlay
-  const agentsMdPath = join(cwd, 'AGENTS.md');
+  // 2. Generate runtime overlay + write session-scoped model instructions file
   const overlay = await generateOverlay(cwd, sessionId);
-  await applyOverlay(agentsMdPath, overlay, cwd);
+  await writeSessionModelInstructionsFile(cwd, sessionId, overlay);
 
   // 3. Write session state
   await resetSessionMetrics(cwd);
@@ -525,8 +533,13 @@ async function preLaunch(cwd: string, sessionId: string): Promise<void> {
  * runCodex: Launch Codex CLI (blocks until exit).
  * All 3 paths (new tmux, existing tmux, no tmux) block via execSync/execFileSync.
  */
-function runCodex(cwd: string, args: string[]): void {
-  const launchArgs = injectModelInstructionsBypassArgs(cwd, args);
+function runCodex(cwd: string, args: string[], sessionId: string): void {
+  const launchArgs = injectModelInstructionsBypassArgs(
+    cwd,
+    args,
+    process.env,
+    sessionModelInstructionsPath(cwd, sessionId),
+  );
   const omxBin = process.argv[1];
   const codexCmd = buildTmuxShellCommand('codex', launchArgs);
   const hudCmd = buildTmuxShellCommand('node', [omxBin, 'hud', '--watch']);
@@ -617,11 +630,11 @@ async function postLaunch(cwd: string, sessionId: string): Promise<void> {
     // Non-fatal
   }
 
-  // 1. Strip AGENTS.md overlay
+  // 1. Remove session-scoped model instructions file
   try {
-    await stripOverlay(join(cwd, 'AGENTS.md'), cwd);
+    await removeSessionModelInstructionsFile(cwd, sessionId);
   } catch (err) {
-    console.error(`[omx] postLaunch: overlay strip failed: ${err instanceof Error ? err.message : err}`);
+    console.error(`[omx] postLaunch: model instructions cleanup failed: ${err instanceof Error ? err.message : err}`);
   }
 
   // 2. Archive session (write history, delete session.json)

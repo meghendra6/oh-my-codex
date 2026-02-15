@@ -8,6 +8,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'fs/promises';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import {
@@ -15,6 +16,9 @@ import {
   applyOverlay,
   stripOverlay,
   hasOverlay,
+  writeSessionModelInstructionsFile,
+  removeSessionModelInstructionsFile,
+  sessionModelInstructionsPath,
 } from '../agents-overlay.js';
 
 async function makeTempDir(): Promise<string> {
@@ -189,6 +193,52 @@ Some instructions here.
     const result = await readFile(agentsMd, 'utf-8');
     assert.ok(hasOverlay(result));
     assert.ok(result.includes('new-file-test'));
+  });
+});
+
+describe('session-scoped model instructions file', () => {
+  let tempDir: string;
+
+  before(async () => { tempDir = await makeTempDir(); });
+  after(async () => { await rm(tempDir, { recursive: true, force: true }); });
+
+  it('writes project AGENTS.md + runtime overlay into session-scoped file', async () => {
+    const projectAgentsMd = join(tempDir, 'AGENTS.md');
+    const projectContent = '# Project instructions\n\nStay in scope.\n';
+    await writeFile(projectAgentsMd, projectContent);
+
+    const overlay = await generateOverlay(tempDir, 'session-a');
+    const writtenPath = await writeSessionModelInstructionsFile(tempDir, 'session-a', overlay);
+    const sessionContent = await readFile(writtenPath, 'utf-8');
+    const projectAfter = await readFile(projectAgentsMd, 'utf-8');
+
+    assert.equal(writtenPath, sessionModelInstructionsPath(tempDir, 'session-a'));
+    assert.match(sessionContent, /# Project instructions/);
+    assert.match(sessionContent, /<!-- OMX:RUNTIME:START -->/);
+    assert.equal(projectAfter, projectContent);
+  });
+
+  it('writes overlay-only session file when project AGENTS.md is missing', async () => {
+    await rm(join(tempDir, 'AGENTS.md'), { force: true });
+    const overlay = await generateOverlay(tempDir, 'session-b');
+    const writtenPath = await writeSessionModelInstructionsFile(tempDir, 'session-b', overlay);
+    const sessionContent = await readFile(writtenPath, 'utf-8');
+
+    assert.ok(sessionContent.includes('<!-- OMX:RUNTIME:START -->'));
+    assert.ok(sessionContent.includes('<!-- OMX:RUNTIME:END -->'));
+  });
+
+  it('removes session-scoped file without touching project AGENTS.md', async () => {
+    const projectAgentsMd = join(tempDir, 'AGENTS.md');
+    const projectContent = '# Keep me unchanged\n';
+    await writeFile(projectAgentsMd, projectContent);
+
+    const overlay = await generateOverlay(tempDir, 'session-c');
+    const writtenPath = await writeSessionModelInstructionsFile(tempDir, 'session-c', overlay);
+    await removeSessionModelInstructionsFile(tempDir, 'session-c');
+
+    assert.equal(existsSync(writtenPath), false);
+    assert.equal(await readFile(projectAgentsMd, 'utf-8'), projectContent);
   });
 });
 

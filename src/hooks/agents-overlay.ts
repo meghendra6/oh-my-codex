@@ -14,7 +14,7 @@
  */
 
 import { readFile, writeFile, mkdir, rm } from 'fs/promises';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { existsSync } from 'fs';
 import { omxNotepadPath, omxProjectMemoryPath } from '../utils/paths.js';
 import { getBaseStateDir, getStateDir } from '../mcp/state-paths.js';
@@ -288,4 +288,43 @@ function stripOverlayContent(content: string): string {
  */
 export function hasOverlay(content: string): boolean {
   return content.includes(START_MARKER) && content.includes(END_MARKER);
+}
+
+export function sessionModelInstructionsPath(cwd: string, sessionId: string): string {
+  return join(getStateDir(cwd, sessionId), 'AGENTS.md');
+}
+
+/**
+ * Build a session-scoped AGENTS.md that combines project instructions (if any)
+ * and the runtime overlay, without mutating <cwd>/AGENTS.md.
+ */
+export async function writeSessionModelInstructionsFile(
+  cwd: string,
+  sessionId: string,
+  overlay: string,
+): Promise<string> {
+  const sessionPath = sessionModelInstructionsPath(cwd, sessionId);
+  await mkdir(dirname(sessionPath), { recursive: true });
+
+  const projectAgentsPath = join(cwd, 'AGENTS.md');
+  let base = '';
+  if (existsSync(projectAgentsPath)) {
+    base = await readFile(projectAgentsPath, 'utf-8');
+    base = stripOverlayContent(base);
+  }
+
+  const composed = base.trim().length > 0
+    ? `${base.trimEnd()}\n\n${overlay}\n`
+    : `${overlay}\n`;
+
+  await writeFile(sessionPath, composed);
+  return sessionPath;
+}
+
+/**
+ * Best-effort cleanup for session-scoped model instructions file.
+ */
+export async function removeSessionModelInstructionsFile(cwd: string, sessionId: string): Promise<void> {
+  const sessionPath = sessionModelInstructionsPath(cwd, sessionId);
+  await rm(sessionPath, { force: true });
 }
