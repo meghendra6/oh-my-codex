@@ -17,6 +17,8 @@ interface HookPluginSdkOptions {
   sideEffectsEnabled?: boolean;
 }
 
+const INJECTION_MARKER = '[OMX_TMUX_INJECT]';
+
 interface PluginTmuxState {
   last_sent_at: number;
   recent_keys: Record<string, number>;
@@ -83,6 +85,11 @@ async function readJsonIfExists<T>(path: string, fallback: T): Promise<T> {
 
 function hashDedupeKey(target: string, text: string): string {
   return createHash('sha256').update(`${target}|${text}`).digest('hex');
+}
+
+function sleepFractionalSeconds(seconds: number): void {
+  if (!Number.isFinite(seconds) || seconds <= 0) return;
+  spawnSync('sleep', [String(seconds)], { encoding: 'utf-8' });
 }
 
 function runTmux(args: string[]): { ok: true; stdout: string } | { ok: false; stderr: string } {
@@ -171,7 +178,8 @@ async function sendTmuxKeys(
     return { ok: false, reason: 'duplicate_event', target: targetResolution.target, paneId: targetResolution.target };
   }
 
-  const typed = runTmux(['send-keys', '-t', targetResolution.target, '-l', text]);
+  const markedText = `${text} ${INJECTION_MARKER}`;
+  const typed = runTmux(['send-keys', '-t', targetResolution.target, '-l', markedText]);
   if (!typed.ok) {
     return {
       ok: false,
@@ -184,7 +192,8 @@ async function sendTmuxKeys(
 
   if (options.submit !== false) {
     const submitA = runTmux(['send-keys', '-t', targetResolution.target, 'C-m']);
-    const submitB = runTmux(['send-keys', '-t', targetResolution.target, 'Enter']);
+    sleepFractionalSeconds(0.1);
+    const submitB = runTmux(['send-keys', '-t', targetResolution.target, 'C-m']);
     if (!submitA.ok && !submitB.ok) {
       return {
         ok: false,
