@@ -44,7 +44,7 @@ For non-trivial SDK/API/framework usage, delegate to `dependency-expert` to chec
 </delegation_rules>
 
 <child_agent_protocol>
-Codex CLI spawns child agents via the `spawn_agent` tool (requires `collab = true`).
+Codex CLI spawns child agents via the `spawn_agent` tool (requires `multi_agent = true`).
 To inject role-specific behavior, the parent MUST read the role prompt and pass it in the spawned agent message.
 
 Delegation steps:

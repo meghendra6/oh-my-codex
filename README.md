@@ -186,7 +186,7 @@ Important rule: do not shutdown while tasks are still `in_progress` unless abort
   - `notify = ["node", "..."]`
   - `model_reasoning_effort = "high"`
   - `developer_instructions = "..."`
-  - `[features] collab = true, child_agents_md = true`
+  - `[features] multi_agent = true, child_agents_md = true`
   - MCP server entries (`omx_state`, `omx_memory`, `omx_code_intel`, `omx_trace`)
   - `[tui] status_line`
 - Project `AGENTS.md`

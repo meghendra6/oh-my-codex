@@ -23,7 +23,7 @@
 | Keyword Detection | 17 keywords | 17 keywords | 100% |
 | Hook Pipeline | 9 events | 6 full + 3 partial | ~89% |
 | HUD/Status Line | 1 | 1 (built-in + CLI) | 100% |
-| Subagent Tracking | 1 | partial (via collab) | 50% |
+| Subagent Tracking | 1 | partial (via multi_agent) | 50% |
 | Python REPL | 1 tool | 0 tools | 0% |
 | **TOTAL** | | | **~95%** |
 
@@ -116,8 +116,8 @@
 | PreToolUse | AGENTS.md inline guidance | PARTIAL (no interception) |
 | PostToolUse | notify config hook + tmux prompt injection workaround | FULL* |
 | UserPromptSubmit | AGENTS.md self-detection | PARTIAL (model-side detection) |
-| SubagentStart | Codex CLI collab native | FULL |
-| SubagentStop | Codex CLI collab native | FULL |
+| SubagentStart | Codex CLI multi_agent native | FULL |
+| SubagentStop | Codex CLI multi_agent native | FULL |
 | PreCompact | AGENTS.md overlay compaction protocol | PARTIAL (instructions only) |
 | Stop | notify config + postLaunch cleanup | FULL |
 | SessionEnd | omx postLaunch lifecycle phase | PARTIAL (post-exit cleanup) |
