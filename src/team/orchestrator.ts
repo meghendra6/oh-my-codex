@@ -1,7 +1,7 @@
 /**
  * Team Orchestration for oh-my-codex
  *
- * Leverages Codex CLI's native collab feature for multi-agent coordination.
+ * Leverages Codex CLI's native multi_agent feature for multi-agent coordination.
  * Provides the staged pipeline: plan -> prd -> exec -> verify -> fix (loop)
  */
 

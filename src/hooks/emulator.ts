@@ -8,7 +8,7 @@
  * 2. PreToolUse -> AGENTS.md instructions (inline guidance, no hook needed)
  * 3. PostToolUse -> notify config (fire-and-forget, no context injection)
  * 4. UserPromptSubmit -> AGENTS.md keyword detection instructions
- * 5. SubagentStart/Stop -> Codex CLI collab system (native tracking)
+ * 5. SubagentStart/Stop -> Codex CLI multi_agent system (native tracking)
  * 6. PreCompact -> Not available (Codex manages compaction internally)
  * 7. Stop -> notify config (can detect turn completion)
  *
@@ -29,8 +29,8 @@ export type HookEvent =
   | 'PreToolUse'         // -> AGENTS.md inline guidance
   | 'PostToolUse'        // -> notify config
   | 'UserPromptSubmit'   // -> AGENTS.md keyword detection
-  | 'SubagentStart'      // -> Codex CLI collab tracking
-  | 'SubagentStop'       // -> Codex CLI collab tracking
+  | 'SubagentStart'      // -> Codex CLI multi_agent tracking
+  | 'SubagentStop'       // -> Codex CLI multi_agent tracking
   | 'PreCompact'         // -> Not available
   | 'Stop'               // -> notify config
   | 'SessionEnd';        // -> Not directly available
@@ -64,14 +64,14 @@ export const HOOK_MAPPING: Record<HookEvent, {
     notes: 'Model detects keywords via AGENTS.md instructions instead of external hook',
   },
   SubagentStart: {
-    mechanism: 'Codex CLI collab system',
+    mechanism: 'Codex CLI multi_agent system',
     capability: 'full',
-    notes: 'Native sub-agent lifecycle tracking via collab feature',
+    notes: 'Native sub-agent lifecycle tracking via multi_agent feature',
   },
   SubagentStop: {
-    mechanism: 'Codex CLI collab system',
+    mechanism: 'Codex CLI multi_agent system',
     capability: 'full',
-    notes: 'Native sub-agent lifecycle tracking via collab feature',
+    notes: 'Native sub-agent lifecycle tracking via multi_agent feature',
   },
   PreCompact: {
     mechanism: 'AGENTS.md overlay compaction protocol',
