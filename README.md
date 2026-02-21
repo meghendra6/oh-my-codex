@@ -252,6 +252,8 @@ npm test
 
 ## Notes
 
+- Release notes: `CHANGELOG.md`
+- Migration guide (post-v0.4.4 mainline): `docs/migration-mainline-post-v0.4.4.md`
 - Coverage and parity notes: `COVERAGE.md`
 - Hook extension workflow: `docs/hooks-extension.md`
 - Setup and contribution details: `CONTRIBUTING.md`
