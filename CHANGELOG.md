@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+- Consolidated the prompt/skill catalog and hardened team runtime contracts after the mainline merge (PR #137).
+- Added setup scope-aware install modes (`user`, `project-local`, `project`) with persisted scope behavior.
+- Added spark worker routing via `--spark` / `--madmax-spark` so team workers can use `gpt-5.3-codex-spark` without forcing the leader model.
+- Added notifier verbosity levels for CCNotifier output control.
+
+### Changed
+- Updated setup and docs references to match the consolidated catalog and current supported prompt/skill surfaces.
+
+### Fixed
+- Hardened tmux runtime behavior, including pane targeting and input submission reliability.
+- Hardened tmux pane capture input handling (post-review fix).
+- Removed stale references to removed `scientist` prompt and `pipeline` skill (post-review fix).
+
+### Removed
+- Removed deprecated prompts: `deep-executor`, `scientist`.
+- Removed deprecated skills: `deepinit`, `learn-about-omx`, `learner`, `pipeline`, `project-session-manager`, `psm`, `release`, `ultrapilot`, `writer-memory`.
+
 ## [0.4.4] - 2026-02-19
 
 ### Added
