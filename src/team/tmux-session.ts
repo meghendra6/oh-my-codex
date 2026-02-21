@@ -1,6 +1,11 @@
 import { spawnSync } from 'child_process';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import {
+  resolveHudPaneLines,
+  resolveTeamMainPaneWidthCells,
+  resolveTeamMainPaneWidthPercent,
+} from '../utils/tmux-layout.js';
 
 export interface TeamSession {
   name: string; // tmux target in "session:window" form
@@ -205,6 +210,10 @@ export function isTmuxAvailable(): boolean {
   return result.status === 0;
 }
 
+export function resolveTeamMainPaneWidthPercentOption(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveTeamMainPaneWidthPercent(env);
+}
+
 // Create tmux session with N worker windows
 // Split the current tmux leader window into worker panes.
 // Returns TeamSession or throws if tmux not available
@@ -276,16 +285,20 @@ export function createTeamSession(
   // Keep leader as full left/main pane; workers stay stacked on the right.
   runTmux(['select-layout', '-t', teamTarget, 'main-vertical']);
 
-  // Force leader pane to use half the window width.
-  const windowWidthResult = runTmux(['display-message', '-p', '-t', teamTarget, '#{window_width}']);
-  if (windowWidthResult.ok) {
-    const width = Number.parseInt(windowWidthResult.stdout.split('\n')[0]?.trim() || '', 10);
-    if (Number.isFinite(width) && width >= 40) {
-      const half = String(Math.floor(width / 2));
-      runTmux(['set-window-option', '-t', teamTarget, 'main-pane-width', half]);
-      runTmux(['select-layout', '-t', teamTarget, 'main-vertical']);
+  // Prefer percent-based width; fallback to fixed cells for older tmux behavior.
+  const percentWidth = resolveTeamMainPaneWidthPercentOption(process.env);
+  const percentWidthResult = runTmux(['set-window-option', '-t', teamTarget, 'main-pane-width', percentWidth]);
+  if (!percentWidthResult.ok) {
+    const windowWidthResult = runTmux(['display-message', '-p', '-t', teamTarget, '#{window_width}']);
+    if (windowWidthResult.ok) {
+      const width = Number.parseInt(windowWidthResult.stdout.split('\n')[0]?.trim() || '', 10);
+      const fallbackCells = resolveTeamMainPaneWidthCells(width, process.env);
+      if (fallbackCells) {
+        runTmux(['set-window-option', '-t', teamTarget, 'main-pane-width', fallbackCells]);
+      }
     }
   }
+  runTmux(['select-layout', '-t', teamTarget, 'main-vertical']);
 
   // Re-create a single HUD pane under the leader column for team visibility.
   // Keep this after layout sizing so HUD does not get mixed into worker stack.
@@ -294,10 +307,12 @@ export function createTeamSession(
   const omxEntry = process.argv[1];
   if (omxEntry && omxEntry.trim() !== '') {
     const hudCmd = `node ${shellQuoteSingle(omxEntry)} hud --watch`;
-    const hudResult = runTmux(['split-window', '-v', '-l', '4', '-t', leaderPaneId, '-d', '-P', '-F', '#{pane_id}', '-c', cwd, hudCmd]);
+    const hudResult = runTmux(['split-window', '-v', '-l', resolveHudPaneLines(process.env), '-t', leaderPaneId, '-d', '-P', '-F', '#{pane_id}', '-c', cwd, hudCmd]);
     if (hudResult.ok) {
       const id = hudResult.stdout.split('\n')[0]?.trim() ?? '';
       if (id.startsWith('%')) hudPaneId = id;
+    } else {
+      console.error('[omx] warning: failed to create HUD pane in tmux; continuing without HUD.');
     }
   }
 

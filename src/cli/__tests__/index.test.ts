@@ -4,6 +4,7 @@ import {
   normalizeCodexLaunchArgs,
   buildTmuxShellCommand,
   buildTmuxSessionName,
+  launchOutsideTmuxSession,
   resolveCliInvocation,
   resolveCodexLaunchPolicy,
   parseTmuxPaneSnapshot,
@@ -15,6 +16,7 @@ import {
   resolveTeamWorkerLaunchArgsEnv,
   injectModelInstructionsBypassArgs,
 } from '../index.js';
+import { resolveHudPaneLines } from '../../utils/tmux-layout.js';
 
 describe('normalizeCodexLaunchArgs', () => {
   it('maps --madmax to codex bypass flag', () => {
@@ -119,6 +121,149 @@ describe('resolveCodexLaunchPolicy', () => {
 
   it('uses tmux-aware launch path when already inside tmux', () => {
     assert.equal(resolveCodexLaunchPolicy({ TMUX: '/tmp/tmux-1000/default,123,0' }), 'inside-tmux');
+  });
+});
+
+describe('launchOutsideTmuxSession', () => {
+  it('falls back when new-session fails', () => {
+    const calls: Array<{ file: string; args: readonly string[] }> = [];
+    const execTmux = ((file: string, args: readonly string[]) => {
+      calls.push({ file, args });
+      throw new Error('new-session failed');
+    }) as unknown as typeof import('child_process').execFileSync;
+
+    assert.equal(launchOutsideTmuxSession({
+      cwd: '/tmp/project',
+      sessionName: 'omx-session',
+      codexCmd: "'codex'",
+      hudCmd: "'hud'",
+      workerLaunchArgs: null,
+    }, execTmux), false);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.args[0], 'new-session');
+  });
+
+  it('continues to attach when split/select fail and uses explicit targets', () => {
+    const calls: Array<{ file: string; args: readonly string[] }> = [];
+    const originalError = console.error;
+    const warnings: string[] = [];
+    console.error = (msg?: unknown) => { warnings.push(String(msg)); };
+    try {
+      const execTmux = ((file: string, args: readonly string[]) => {
+        calls.push({ file, args });
+        if (args[0] === 'new-session') return '%1\n';
+        if (args[0] === 'split-window') throw new Error('split failed');
+        if (args[0] === 'select-pane') throw new Error('select failed');
+        return Buffer.from('');
+      }) as unknown as typeof import('child_process').execFileSync;
+
+      assert.equal(launchOutsideTmuxSession({
+        cwd: '/tmp/project',
+        sessionName: 'omx-session',
+        codexCmd: "'codex'",
+        hudCmd: "'hud'",
+        workerLaunchArgs: null,
+      }, execTmux), true);
+    } finally {
+      console.error = originalError;
+    }
+
+    const split = calls.find((c) => c.args[0] === 'split-window');
+    const select = calls.find((c) => c.args[0] === 'select-pane');
+    const attach = calls.find((c) => c.args[0] === 'attach-session');
+    assert.ok(split);
+    assert.ok(select);
+    assert.ok(attach);
+    assert.ok(split?.args.includes('-t'));
+    assert.ok(split?.args.includes('%1'));
+    assert.ok(select?.args.includes('%1'));
+    assert.ok(warnings.some((w) => w.startsWith('[omx] warning: failed to create HUD pane in tmux; continuing without HUD.')));
+    assert.ok(warnings.some((w) => w.startsWith('[omx] warning: failed to focus leader pane; continuing.')));
+  });
+
+  it('falls back when attach-session fails', () => {
+    const calls: Array<{ file: string; args: readonly string[] }> = [];
+    const execTmux = ((file: string, args: readonly string[]) => {
+      calls.push({ file, args });
+      if (args[0] === 'new-session') return '%1\n';
+      if (args[0] === 'attach-session') throw new Error('attach failed');
+      return Buffer.from('');
+    }) as unknown as typeof import('child_process').execFileSync;
+
+    assert.equal(launchOutsideTmuxSession({
+      cwd: '/tmp/project',
+      sessionName: 'omx-session',
+      codexCmd: "'codex'",
+      hudCmd: "'hud'",
+      workerLaunchArgs: null,
+    }, execTmux), false);
+    assert.ok(calls.some((c) => c.args[0] === 'attach-session'));
+    assert.ok(calls.some((c) => c.args[0] === 'kill-session'));
+  });
+
+  it('uses shared HUD pane resolver for split height', () => {
+    const calls: Array<readonly string[]> = [];
+    const prev = process.env.OMX_HUD_PANE_LINES;
+    process.env.OMX_HUD_PANE_LINES = '9';
+    try {
+      const execTmux = ((_file: string, args: readonly string[]) => {
+        calls.push(args);
+        if (args[0] === 'new-session') return '%1\n';
+        return Buffer.from('');
+      }) as unknown as typeof import('child_process').execFileSync;
+
+      launchOutsideTmuxSession({
+        cwd: '/tmp/project',
+        sessionName: 'omx-session',
+        codexCmd: "'codex'",
+        hudCmd: "'hud'",
+        workerLaunchArgs: null,
+      }, execTmux);
+    } finally {
+      if (typeof prev === 'string') process.env.OMX_HUD_PANE_LINES = prev;
+      else delete process.env.OMX_HUD_PANE_LINES;
+    }
+
+    const split = calls.find((args) => args[0] === 'split-window');
+    assert.ok(split);
+    const lineIndex = split?.indexOf('-l') ?? -1;
+    assert.notEqual(lineIndex, -1);
+    assert.equal(split?.[lineIndex + 1], resolveHudPaneLines({ OMX_HUD_PANE_LINES: '9' }));
+  });
+
+  it('uses COLUMNS/LINES derived size flags for detached session', () => {
+    const calls: Array<readonly string[]> = [];
+    const prevColumns = process.env.COLUMNS;
+    const prevLines = process.env.LINES;
+    process.env.COLUMNS = '120';
+    process.env.LINES = '40';
+    try {
+      const execTmux = ((_file: string, args: readonly string[]) => {
+        calls.push(args);
+        if (args[0] === 'new-session') return '%1\n';
+        return Buffer.from('');
+      }) as unknown as typeof import('child_process').execFileSync;
+
+      launchOutsideTmuxSession({
+        cwd: '/tmp/project',
+        sessionName: 'omx-session',
+        codexCmd: "'codex'",
+        hudCmd: "'hud'",
+        workerLaunchArgs: null,
+      }, execTmux);
+    } finally {
+      if (typeof prevColumns === 'string') process.env.COLUMNS = prevColumns;
+      else delete process.env.COLUMNS;
+      if (typeof prevLines === 'string') process.env.LINES = prevLines;
+      else delete process.env.LINES;
+    }
+
+    const newSession = calls.find((args) => args[0] === 'new-session');
+    assert.ok(newSession);
+    assert.ok(newSession?.includes('-x'));
+    assert.ok(newSession?.includes('120'));
+    assert.ok(newSession?.includes('-y'));
+    assert.ok(newSession?.includes('40'));
   });
 });
 

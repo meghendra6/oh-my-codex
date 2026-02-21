@@ -10,6 +10,7 @@ import {
   killWorker,
   killWorkerByPaneId,
   listTeamSessions,
+  resolveTeamMainPaneWidthPercentOption,
   sanitizeTeamName,
   sendToWorker,
   waitForWorkerReady,
@@ -38,6 +39,17 @@ describe('sanitizeTeamName', () => {
 
   it('rejects empty after sanitization', () => {
     assert.throws(() => sanitizeTeamName('!!!'), /empty/i);
+  });
+});
+
+describe('resolveTeamMainPaneWidthPercentOption', () => {
+  it('uses 50% default and clamps to 35..75%', () => {
+    assert.equal(resolveTeamMainPaneWidthPercentOption({}), '50%');
+    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: '35' }), '35%');
+    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: '75' }), '75%');
+    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: '10' }), '35%');
+    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: '99' }), '75%');
+    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: 'abc' }), '50%');
   });
 });
 

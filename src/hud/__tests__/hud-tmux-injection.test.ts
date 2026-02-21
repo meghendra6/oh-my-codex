@@ -10,6 +10,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { shellEscape, buildTmuxSplitArgs } from '../index.js';
+import { resolveHudPaneLines } from '../../utils/tmux-layout.js';
 
 // ── Vulnerability demonstration (old code) ──────────────────────────────────
 
@@ -92,8 +93,9 @@ describe('shellEscape', () => {
 describe('buildTmuxSplitArgs – shell injection hardening', () => {
   it('produces correct argv for normal inputs', () => {
     const args = buildTmuxSplitArgs('/home/user/project', '/usr/local/bin/omx.js');
+    const paneLines = resolveHudPaneLines(process.env);
     assert.deepEqual(args, [
-      'split-window', '-v', '-l', '4',
+      'split-window', '-v', '-l', paneLines,
       '-c', '/home/user/project',
       "node '/usr/local/bin/omx.js' hud --watch",
     ]);

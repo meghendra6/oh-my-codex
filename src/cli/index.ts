@@ -27,6 +27,7 @@ import {
 } from '../hooks/session.js';
 import { getPackageRoot } from '../utils/package.js';
 import { codexConfigPath } from '../utils/paths.js';
+import { resolveDetachedSessionSize, resolveHudPaneLines } from '../utils/tmux-layout.js';
 import { getModelForMode } from '../config/models.js';
 import { buildHookEvent } from '../hooks/extensibility/events.js';
 import { dispatchHookEvent } from '../hooks/extensibility/dispatcher.js';
@@ -733,7 +734,7 @@ function runCodex(cwd: string, args: string[], sessionId: string): void {
     try {
       hudPaneId = createHudWatchPane(cwd, hudCmd);
     } catch {
-      // HUD split failed, continue without it
+      warnTmuxDegrade('failed to create HUD pane in current tmux session; continuing without HUD.');
     }
 
     try {
@@ -755,23 +756,15 @@ function runCodex(cwd: string, args: string[], sessionId: string): void {
     const codexCmd = buildTmuxShellCommand('codex', launchArgs);
     const tmuxSessionId = `omx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const sessionName = buildTmuxSessionName(cwd, tmuxSessionId);
-    try {
-      execFileSync(
-        'tmux',
-        [
-          'new-session', '-d', '-s', sessionName, '-c', cwd,
-          ...(workerLaunchArgs ? ['-e', `${TEAM_WORKER_LAUNCH_ARGS_ENV}=${workerLaunchArgs}`] : []),
-          codexCmd,
-          ';',
-          'split-window', '-v', '-l', '4', '-d', '-c', cwd, hudCmd,
-          ';',
-          'select-pane', '-t', '0',
-          ';',
-          'attach-session', '-t', sessionName,
-        ],
-        { stdio: 'inherit' }
-      );
-    } catch {
+    const attached = launchOutsideTmuxSession({
+      cwd,
+      sessionName,
+      codexCmd,
+      hudCmd,
+      workerLaunchArgs,
+    });
+    if (!attached) {
+      warnTmuxDegrade('failed to launch tmux session; falling back to direct codex.');
       // tmux not available or failed, just run codex directly
       try {
         execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
@@ -779,6 +772,102 @@ function runCodex(cwd: string, args: string[], sessionId: string): void {
         // Codex exited
       }
     }
+  }
+}
+
+interface OutsideTmuxSessionLaunchOptions {
+  cwd: string;
+  sessionName: string;
+  codexCmd: string;
+  hudCmd: string;
+  workerLaunchArgs: string | null;
+}
+
+function warnTmuxDegrade(message: string): void {
+  console.error(`[omx] warning: ${message}`);
+}
+
+function parsePaneId(output: string): string | null {
+  const paneId = output.split('\n')[0]?.trim() || '';
+  return paneId.startsWith('%') ? paneId : null;
+}
+
+export function launchOutsideTmuxSession(
+  options: OutsideTmuxSessionLaunchOptions,
+  execTmux: typeof execFileSync = execFileSync,
+): boolean {
+  const { cwd, sessionName, codexCmd, hudCmd, workerLaunchArgs } = options;
+  const detachedSize = resolveDetachedSessionSize({
+    ...process.env,
+    COLUMNS: process.env.COLUMNS ?? String(process.stdout.columns ?? ''),
+    LINES: process.env.LINES ?? String(process.stdout.rows ?? ''),
+  });
+  const newSessionArgs = [
+    'new-session',
+    '-d',
+    '-s',
+    sessionName,
+    '-c',
+    cwd,
+    ...(detachedSize ? ['-x', detachedSize.cols, '-y', detachedSize.rows] : []),
+    ...(workerLaunchArgs ? ['-e', `${TEAM_WORKER_LAUNCH_ARGS_ENV}=${workerLaunchArgs}`] : []),
+    codexCmd,
+  ];
+  let leaderPaneTarget: string | null = null;
+
+  try {
+    const createdPaneOutput = execTmux('tmux', ['new-session', '-P', '-F', '#{pane_id}', ...newSessionArgs.slice(1)], { encoding: 'utf-8' });
+    if (typeof createdPaneOutput === 'string') {
+      leaderPaneTarget = parsePaneId(createdPaneOutput);
+    }
+  } catch {
+    return false;
+  }
+  if (!leaderPaneTarget) {
+    try {
+      const detectedPaneOutput = execTmux('tmux', ['display-message', '-p', '-t', sessionName, '#{pane_id}'], { encoding: 'utf-8' });
+      if (typeof detectedPaneOutput === 'string') {
+        leaderPaneTarget = parsePaneId(detectedPaneOutput);
+      }
+    } catch {
+      // Best-effort fallback below
+    }
+  }
+  if (!leaderPaneTarget) {
+    try {
+      execTmux('tmux', ['kill-session', '-t', sessionName], { stdio: 'ignore' });
+    } catch {
+      // Ignore cleanup errors
+    }
+    return false;
+  }
+
+  try {
+    execTmux(
+      'tmux',
+      ['split-window', '-v', '-l', resolveHudPaneLines(process.env), '-t', leaderPaneTarget, '-d', '-c', cwd, hudCmd],
+      { stdio: 'inherit' },
+    );
+  } catch {
+    warnTmuxDegrade('failed to create HUD pane in tmux; continuing without HUD.');
+  }
+
+  try {
+    execTmux('tmux', ['select-pane', '-t', leaderPaneTarget], { stdio: 'ignore' });
+  } catch {
+    warnTmuxDegrade('failed to focus leader pane; continuing.');
+  }
+
+  try {
+    execTmux('tmux', ['attach-session', '-t', sessionName], { stdio: 'inherit' });
+    return true;
+  } catch {
+    try {
+      execTmux('tmux', ['kill-session', '-t', sessionName], { stdio: 'ignore' });
+    } catch {
+      // Ignore cleanup errors
+    }
+    return false;
   }
 }
 
@@ -798,7 +887,7 @@ function listHudWatchPaneIdsInCurrentWindow(currentPaneId?: string): string[] {
 function createHudWatchPane(cwd: string, hudCmd: string): string | null {
   const output = execFileSync(
     'tmux',
-    ['split-window', '-v', '-l', '4', '-d', '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd],
+    ['split-window', '-v', '-l', resolveHudPaneLines(process.env), '-d', '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd],
     { encoding: 'utf-8' }
   );
   const paneId = output.split('\n')[0]?.trim() || '';
