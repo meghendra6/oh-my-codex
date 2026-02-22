@@ -5,6 +5,7 @@ import { join } from 'path';
 
 const ALL_EVENT_TYPES = [
   'task_completed',
+  'task_failed',
   'worker_idle',
   'worker_stopped',
   'message_received',
@@ -14,7 +15,7 @@ const ALL_EVENT_TYPES = [
 ] as const;
 
 describe('team_append_event schema validation', () => {
-  it('schema enum contains exactly 7 event types including team_leader_nudge', async () => {
+  it('schema enum contains exactly 8 event types including team_leader_nudge', async () => {
     const src = await readFile(join(process.cwd(), 'src/mcp/state-server.ts'), 'utf8');
 
     // Find the enum array for the team_append_event type field
@@ -28,8 +29,8 @@ describe('team_append_event schema validation', () => {
 
     assert.equal(
       enumValues.length,
-      7,
-      `Expected 7 enum values, got ${enumValues.length}: ${enumValues.join(', ')}`
+      8,
+      `Expected 8 enum values, got ${enumValues.length}: ${enumValues.join(', ')}`
     );
 
     for (const eventType of ALL_EVENT_TYPES) {
