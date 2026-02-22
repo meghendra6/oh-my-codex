@@ -161,7 +161,7 @@ export type TaskReadiness =
 
 export type ClaimTaskResult =
   | { ok: true; task: TeamTaskV2; claimToken: string }
-  | { ok: false; error: 'claim_conflict' | 'blocked_dependency' | 'task_not_found' | 'already_terminal'; dependencies?: string[] };
+  | { ok: false; error: 'claim_conflict' | 'blocked_dependency' | 'task_not_found' | 'already_terminal' | 'worker_not_found'; dependencies?: string[] };
 
 export type TransitionTaskResult =
   | { ok: true; task: TeamTaskV2 }
@@ -1060,6 +1060,14 @@ export async function claimTask(
   expectedVersion: number | null,
   cwd: string
 ): Promise<ClaimTaskResult> {
+  // Validate that the claiming worker is registered in the team.
+  // Without this check, ghost worker IDs (non-existent workers) could claim
+  // tasks, breaking team state integrity and routing assumptions.
+  const cfg = await readTeamConfig(teamName, cwd);
+  if (!cfg || !cfg.workers.some((w) => w.name === workerName)) {
+    return { ok: false, error: 'worker_not_found' };
+  }
+
   const existing = await readTask(teamName, taskId, cwd);
   if (!existing) return { ok: false, error: 'task_not_found' };
   const readiness = await computeTaskReadiness(teamName, taskId, cwd);

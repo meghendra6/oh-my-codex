@@ -91,6 +91,26 @@ describe('team state', () => {
     }
   });
 
+  it('claimTask rejects a ghost worker ID (worker_not_found)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-claim-ghost-'));
+    try {
+      await initTeamState('team-ghost', 't', 'executor', 1, cwd);
+      const t = await createTask('team-ghost', { subject: 'a', description: 'd', status: 'pending' }, cwd);
+
+      // 'ghost-worker' is not registered in the team (only 'worker-1' exists).
+      const result = await claimTask('team-ghost', t.id, 'ghost-worker', t.version ?? 1, cwd);
+      assert.equal(result.ok, false);
+      assert.equal(result.ok ? 'x' : result.error, 'worker_not_found');
+
+      // The task must remain unclaimed.
+      const reread = await readTask('team-ghost', t.id, cwd);
+      assert.equal(reread?.status, 'pending');
+      assert.equal(reread?.owner, undefined);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('claimTask enforces dependency readiness (blocked_dependency)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-claim-'));
     try {
@@ -163,7 +183,8 @@ describe('team state', () => {
   it('claimTask claim locking yields deterministic claim_conflict', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-claim-lock-'));
     try {
-      await initTeamState('team-lock', 't', 'executor', 1, cwd);
+      // Use 2 workers so both claimants are registered in the team.
+      await initTeamState('team-lock', 't', 'executor', 2, cwd);
       const t = await createTask('team-lock', { subject: 'a', description: 'd', status: 'pending' }, cwd);
 
       // Both try to claim based on the same expected version; only one should succeed.

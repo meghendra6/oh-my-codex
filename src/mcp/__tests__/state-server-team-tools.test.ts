@@ -285,7 +285,8 @@ describe('state-server team comm tools', () => {
 
     const wd = await mkdtemp(join(tmpdir(), 'omx-state-team-tools-'));
     try {
-      await initTeamState('delta-team', 'transition test', 'executor', 1, wd);
+      // Use 2 workers so worker-2 is registered and the reclaim below reaches the already_terminal check.
+      await initTeamState('delta-team', 'transition test', 'executor', 2, wd);
 
       const createResp = await handleStateToolCall({
         params: {
