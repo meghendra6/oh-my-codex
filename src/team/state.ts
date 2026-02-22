@@ -160,7 +160,7 @@ export type TaskReadiness =
 
 export type ClaimTaskResult =
   | { ok: true; task: TeamTaskV2; claimToken: string }
-  | { ok: false; error: 'claim_conflict' | 'blocked_dependency' | 'task_not_found'; dependencies?: string[] };
+  | { ok: false; error: 'claim_conflict' | 'blocked_dependency' | 'task_not_found' | 'already_terminal'; dependencies?: string[] };
 
 export type TransitionTaskResult =
   | { ok: true; task: TeamTaskV2 }
@@ -1013,6 +1013,9 @@ export async function claimTask(
     const v = normalizeTask(current);
     if (expectedVersion !== null && v.version !== expectedVersion) {
       return { ok: false as const, error: 'claim_conflict' as const };
+    }
+    if (v.status === 'completed' || v.status === 'failed') {
+      return { ok: false as const, error: 'already_terminal' as const };
     }
 
     const claimToken = randomUUID();

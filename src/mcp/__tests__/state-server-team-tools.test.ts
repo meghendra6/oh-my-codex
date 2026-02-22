@@ -260,6 +260,22 @@ describe('state-server team comm tools', () => {
       assert.equal(transitionJson.ok, true);
       assert.equal(transitionJson.task?.status, 'completed');
       assert.equal(typeof transitionJson.task?.completed_at, 'string');
+
+      // Attempting to claim an already-completed task must be rejected
+      const reclaimResp = await handleStateToolCall({
+        params: {
+          name: 'team_claim_task',
+          arguments: {
+            team_name: 'delta-team',
+            task_id: '1',
+            worker: 'worker-2',
+            workingDirectory: wd,
+          },
+        },
+      });
+      const reclaimJson = JSON.parse(reclaimResp.content[0]?.text || '{}') as { ok?: boolean; error?: string };
+      assert.equal(reclaimJson.ok, false);
+      assert.equal(reclaimJson.error, 'already_terminal');
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
