@@ -5,7 +5,7 @@
  * Codex CLI, and inject text into panes. Used by the reply-listener daemon.
  */
 
-import { execSync, spawnSync } from 'child_process';
+import { execSync, execFileSync, spawnSync } from 'child_process';
 
 export function isTmuxAvailable(): boolean {
   try {
@@ -16,9 +16,18 @@ export function isTmuxAvailable(): boolean {
   }
 }
 
+/**
+ * Builds the argv array for `tmux capture-pane`.
+ * Keeping args separate (never interpolated into a shell string) prevents
+ * command injection through a malicious paneId value (issue #156).
+ */
+export function buildCapturePaneArgv(paneId: string, lines: number): string[] {
+  return ['capture-pane', '-t', paneId, '-p', '-S', `-${lines}`];
+}
+
 export function capturePaneContent(paneId: string, lines: number = 15): string {
   try {
-    return execSync(`tmux capture-pane -t ${paneId} -p -S -${lines}`, {
+    return execFileSync('tmux', buildCapturePaneArgv(paneId, lines), {
       encoding: 'utf-8',
       timeout: 3000,
       stdio: ['pipe', 'pipe', 'pipe'],

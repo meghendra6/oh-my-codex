@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzePaneContent, buildSendPaneArgvs } from '../tmux-detector.js';
+import { analyzePaneContent, buildSendPaneArgvs, buildCapturePaneArgv } from '../tmux-detector.js';
 import type { PaneAnalysis } from '../tmux-detector.js';
 
 describe('analyzePaneContent', () => {
@@ -166,6 +166,53 @@ describe('buildSendPaneArgvs', () => {
       ['send-keys', '-t', '%5', '-l', '--', 'continue'],
       ['send-keys', '-t', '%5', 'C-m'],
       ['send-keys', '-t', '%5', 'C-m'],
+    ]);
+  });
+});
+
+// issue #156: capturePaneContent must use execFileSync with an args array so
+// that a malicious paneId cannot inject arbitrary shell commands.
+describe('buildCapturePaneArgv', () => {
+  it('returns an array with paneId as a standalone element (no shell interpolation)', () => {
+    const argv = buildCapturePaneArgv('%3', 15);
+    // paneId must appear as its own discrete element
+    assert.ok(argv.includes('%3'), 'paneId must be present in the argv');
+    // No other element should embed paneId (shell interpolation would produce e.g. '-t %3' as one string)
+    assert.ok(
+      !argv.some(el => el !== '%3' && el.includes('%3')),
+      'paneId must not be embedded inside another element',
+    );
+  });
+
+  it('places paneId immediately after the -t flag', () => {
+    const argv = buildCapturePaneArgv('%7', 10);
+    const tIdx = argv.indexOf('-t');
+    assert.ok(tIdx !== -1, 'argv must contain -t flag');
+    assert.equal(argv[tIdx + 1], '%7', 'paneId must be the element directly after -t');
+  });
+
+  it('a paneId containing shell metacharacters is passed as a literal argument', () => {
+    const malicious = '%0; touch /tmp/injected';
+    const argv = buildCapturePaneArgv(malicious, 15);
+    const tIdx = argv.indexOf('-t');
+    assert.ok(tIdx !== -1);
+    // The exact malicious string must appear as a single element — no expansion
+    assert.equal(argv[tIdx + 1], malicious);
+    // It must not be split across multiple elements
+    assert.ok(!argv.some(el => el !== malicious && el.includes(';')));
+  });
+
+  it('encodes the lines count as a single -S argument (not a separate shell flag)', () => {
+    const argv = buildCapturePaneArgv('%1', 30);
+    assert.ok(argv.includes('-30'), 'lines must appear as -<n> in the array');
+    const sIdx = argv.indexOf('-S');
+    assert.ok(sIdx !== -1, '-S flag must be present');
+    assert.equal(argv[sIdx + 1], '-30', '-S and the lines value must be adjacent elements');
+  });
+
+  it('produces the canonical argv for a normal pane', () => {
+    assert.deepEqual(buildCapturePaneArgv('%3', 15), [
+      'capture-pane', '-t', '%3', '-p', '-S', '-15',
     ]);
   });
 });
