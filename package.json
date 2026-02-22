@@ -50,5 +50,9 @@
   "devDependencies": {
     "@types/node": "^22.19.11",
     "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "ajv": ">=8.18.0",
+    "hono": ">=4.11.10"
   }
 }
