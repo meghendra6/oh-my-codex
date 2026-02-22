@@ -989,16 +989,19 @@ export async function updateTask(
     const existing = await readTask(teamName, taskId, cwd);
     if (!existing) return null;
 
-    if (updates.status && !['pending', 'blocked', 'in_progress', 'completed', 'failed'].includes(updates.status)) {
+    if (updates.status !== undefined && !['pending', 'blocked', 'in_progress', 'completed', 'failed'].includes(updates.status)) {
       throw new Error(`Invalid task status: ${updates.status}`);
     }
+
+    const rawDeps = updates.depends_on ?? updates.blocked_by ?? existing.depends_on ?? existing.blocked_by ?? [];
+    const normalizedDeps = Array.isArray(rawDeps) ? rawDeps : [];
 
     const merged: TeamTaskV2 = {
       ...normalizeTask(existing),
       ...updates,
       id: existing.id,
       created_at: existing.created_at,
-      depends_on: updates.depends_on ?? updates.blocked_by ?? existing.depends_on ?? existing.blocked_by ?? [],
+      depends_on: normalizedDeps,
       version: Math.max(1, existing.version ?? 1) + 1,
     };
 

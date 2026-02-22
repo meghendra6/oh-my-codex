@@ -546,6 +546,51 @@ describe('team state', () => {
     }
   });
 
+  it('updateTask rejects empty string status and leaves task readable', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-state-'));
+    try {
+      await initTeamState('team-upd-empty-status', 't', 'executor', 1, cwd);
+      const created = await createTask(
+        'team-upd-empty-status',
+        { subject: 's', description: 'd', status: 'pending' },
+        cwd
+      );
+
+      await assert.rejects(
+        () => updateTask('team-upd-empty-status', created.id, { status: '' as never }, cwd),
+        /Invalid task status/
+      );
+
+      // Task must still be readable after the rejected update.
+      const reread = await readTask('team-upd-empty-status', created.id, cwd);
+      assert.ok(reread, 'task should still be readable after invalid update was rejected');
+      assert.equal(reread?.status, 'pending');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('updateTask coerces non-array depends_on to [] so claimTask does not crash', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-state-'));
+    try {
+      await initTeamState('team-upd-bad-deps', 't', 'executor', 1, cwd);
+      const created = await createTask(
+        'team-upd-bad-deps',
+        { subject: 's', description: 'd', status: 'pending' },
+        cwd
+      );
+
+      // Pass a non-array depends_on to simulate a bad MCP payload.
+      await updateTask('team-upd-bad-deps', created.id, { depends_on: 'not-an-array' as never }, cwd);
+
+      // claimTask must not throw "deps.map is not a function".
+      const claim = await claimTask('team-upd-bad-deps', created.id, 'worker-1', null, cwd);
+      assert.equal(claim.ok, true);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('updateTask is safe under concurrent calls (no lost updates)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-state-'));
     try {
