@@ -110,7 +110,7 @@ export function getTeamTmuxSessions(teamName: string): string[] {
   const sanitized = teamName.replace(/[^a-zA-Z0-9-]/g, "");
   if (!sanitized) return [];
 
-  const prefix = `omx-team-${sanitized}-`;
+  const prefix = `omx-team-${sanitized}`;
   try {
     const output = execSync("tmux list-sessions -F '#{session_name}'", {
       encoding: "utf-8",
@@ -120,8 +120,7 @@ export function getTeamTmuxSessions(teamName: string): string[] {
     return output
       .trim()
       .split("\n")
-      .filter((s) => s.startsWith(prefix))
-      .map((s) => s.slice(prefix.length));
+      .filter((s) => s === prefix || s.startsWith(`${prefix}-`));
   } catch {
     return [];
   }

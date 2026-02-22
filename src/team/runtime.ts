@@ -1,4 +1,5 @@
 import { join } from 'path';
+import { getTeamTmuxSessions } from '../notifications/tmux.js';
 import { existsSync } from 'fs';
 import { readdir, readFile } from 'fs/promises';
 import {
@@ -683,9 +684,9 @@ export async function resumeTeam(teamName: string, cwd: string): Promise<TeamRun
   if (!config) return null;
 
   // Check if tmux session still exists
-  const sessions = listTeamSessions();
   const baseSession = config.tmux_session.split(':')[0];
-  if (!sessions.includes(baseSession)) return null;
+  const teamSessions = getTeamTmuxSessions(sanitized);
+  if (!teamSessions.includes(baseSession)) return null;
 
   return {
     teamName: sanitized,
