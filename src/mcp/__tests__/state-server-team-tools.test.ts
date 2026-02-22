@@ -280,4 +280,115 @@ describe('state-server team comm tools', () => {
       await rm(wd, { recursive: true, force: true });
     }
   });
+
+  it('team_update_task rejects lifecycle field mutations without a claim token', async () => {
+    process.env.OMX_STATE_SERVER_DISABLE_AUTO_START = '1';
+    const { handleStateToolCall } = await import('../state-server.js');
+
+    const wd = await mkdtemp(join(tmpdir(), 'omx-state-team-tools-'));
+    try {
+      await initTeamState('epsilon-team', 'lifecycle guard test', 'executor', 1, wd);
+
+      // Create a task to operate on
+      const createResp = await handleStateToolCall({
+        params: {
+          name: 'team_create_task',
+          arguments: {
+            team_name: 'epsilon-team',
+            subject: 'Guard test task',
+            description: 'must not be mutated directly',
+            workingDirectory: wd,
+          },
+        },
+      });
+      const createJson = JSON.parse(createResp.content[0]?.text || '{}') as { ok?: boolean; task?: { id?: string; status?: string } };
+      assert.equal(createJson.ok, true);
+
+      // Attempting to set status directly must be rejected
+      const statusResp = await handleStateToolCall({
+        params: {
+          name: 'team_update_task',
+          arguments: {
+            team_name: 'epsilon-team',
+            task_id: '1',
+            status: 'completed',
+            workingDirectory: wd,
+          },
+        },
+      });
+      assert.equal(statusResp.isError, true);
+      const statusJson = JSON.parse(statusResp.content[0]?.text || '{}') as { error?: string };
+      assert.ok(statusJson.error?.includes('status'), `expected error mentioning "status", got: ${statusJson.error}`);
+
+      // Attempting to set owner directly must be rejected
+      const ownerResp = await handleStateToolCall({
+        params: {
+          name: 'team_update_task',
+          arguments: {
+            team_name: 'epsilon-team',
+            task_id: '1',
+            owner: 'worker-1',
+            workingDirectory: wd,
+          },
+        },
+      });
+      assert.equal(ownerResp.isError, true);
+      const ownerJson = JSON.parse(ownerResp.content[0]?.text || '{}') as { error?: string };
+      assert.ok(ownerJson.error?.includes('owner'), `expected error mentioning "owner", got: ${ownerJson.error}`);
+
+      // Attempting to set result directly must be rejected
+      const resultResp = await handleStateToolCall({
+        params: {
+          name: 'team_update_task',
+          arguments: {
+            team_name: 'epsilon-team',
+            task_id: '1',
+            result: 'done',
+            workingDirectory: wd,
+          },
+        },
+      });
+      assert.equal(resultResp.isError, true);
+      const resultJson = JSON.parse(resultResp.content[0]?.text || '{}') as { error?: string };
+      assert.ok(resultJson.error?.includes('result'), `expected error mentioning "result", got: ${resultJson.error}`);
+
+      // Attempting to set error directly must be rejected
+      const errorResp = await handleStateToolCall({
+        params: {
+          name: 'team_update_task',
+          arguments: {
+            team_name: 'epsilon-team',
+            task_id: '1',
+            error: 'oops',
+            workingDirectory: wd,
+          },
+        },
+      });
+      assert.equal(errorResp.isError, true);
+      const errorJson = JSON.parse(errorResp.content[0]?.text || '{}') as { error?: string };
+      assert.ok(errorJson.error?.includes('error'), `expected error mentioning "error", got: ${errorJson.error}`);
+
+      // Non-lifecycle metadata updates must still work
+      const metaResp = await handleStateToolCall({
+        params: {
+          name: 'team_update_task',
+          arguments: {
+            team_name: 'epsilon-team',
+            task_id: '1',
+            subject: 'Updated subject',
+            description: 'Updated description',
+            workingDirectory: wd,
+          },
+        },
+      });
+      assert.equal(metaResp.isError, undefined);
+      const metaJson = JSON.parse(metaResp.content[0]?.text || '{}') as { ok?: boolean; task?: { subject?: string; status?: string } };
+      assert.equal(metaJson.ok, true);
+      assert.equal(metaJson.task?.subject, 'Updated subject');
+      // Status must remain unchanged (pending)
+      assert.equal(metaJson.task?.status, 'pending');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
 });

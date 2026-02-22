@@ -334,16 +334,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'team_update_task',
-      description: 'Update task fields (status, owner, result, error, etc.).',
+      description: 'Update non-lifecycle task metadata (subject, description, blocked_by, requires_code_change). Status/owner/result/error are lifecycle fields that must be changed via team_claim_task + team_transition_task_status.',
       inputSchema: {
         type: 'object',
         properties: {
           team_name: { type: 'string', description: 'Sanitized team name' },
           task_id: { type: 'string', description: 'Task ID to update' },
-          status: { type: 'string', enum: ['pending', 'blocked', 'in_progress', 'completed', 'failed'] },
-          owner: { type: 'string', description: 'Worker name' },
-          result: { type: 'string', description: 'Completion summary' },
-          error: { type: 'string', description: 'Failure reason' },
+          subject: { type: 'string', description: 'Task subject/title' },
+          description: { type: 'string', description: 'Task description' },
+          blocked_by: { type: 'array', items: { type: 'string' }, description: 'Task IDs this task depends on' },
+          requires_code_change: { type: 'boolean', description: 'Whether this task requires a code change' },
           workingDirectory: { type: 'string' },
         },
         required: ['team_name', 'task_id'],
@@ -949,6 +949,19 @@ export async function handleStateToolCall(request: {
       const taskId = String((args as Record<string, unknown>).task_id || '').trim();
       if (!teamName || !taskId) {
         return { content: [{ type: 'text', text: JSON.stringify({ error: 'team_name and task_id are required' }) }], isError: true };
+      }
+      const lifecycleFields = ['status', 'owner', 'result', 'error'] as const;
+      const presentLifecycleFields = lifecycleFields.filter((f) => f in (args as Record<string, unknown>));
+      if (presentLifecycleFields.length > 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              error: `team_update_task cannot mutate lifecycle fields: ${presentLifecycleFields.join(', ')}. Use team_claim_task + team_transition_task_status to change task status/owner/result/error.`,
+            }),
+          }],
+          isError: true,
+        };
       }
       const { team_name: _tn, task_id: _ti, workingDirectory: _wd, ...updates } = args as Record<string, unknown>;
       const task = await teamUpdateTask(teamName, taskId, updates, cwd);
