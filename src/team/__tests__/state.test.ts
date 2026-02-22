@@ -91,6 +91,37 @@ describe('team state', () => {
     }
   });
 
+  it('initTeamState persists workspace metadata to config + manifest', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-metadata-'));
+    try {
+      const cfg = await initTeamState(
+        'team-meta',
+        't',
+        'executor',
+        1,
+        cwd,
+        DEFAULT_MAX_WORKERS,
+        process.env,
+        {
+          leader_cwd: '/tmp/leader',
+          team_state_root: '/tmp/leader/.omx/state',
+          workspace_mode: 'worktree',
+        },
+      );
+      assert.equal(cfg.leader_cwd, '/tmp/leader');
+      assert.equal(cfg.team_state_root, '/tmp/leader/.omx/state');
+      assert.equal(cfg.workspace_mode, 'worktree');
+
+      const manifest = await readTeamManifestV2('team-meta', cwd);
+      assert.ok(manifest);
+      assert.equal(manifest?.leader_cwd, '/tmp/leader');
+      assert.equal(manifest?.team_state_root, '/tmp/leader/.omx/state');
+      assert.equal(manifest?.workspace_mode, 'worktree');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('claimTask enforces dependency readiness (blocked_dependency)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-claim-'));
     try {
