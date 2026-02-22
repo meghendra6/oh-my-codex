@@ -112,6 +112,7 @@ export interface TeamEvent {
   team: string;
   type:
     | 'task_completed'
+    | 'task_failed'
     | 'worker_idle'
     | 'worker_stopped'
     | 'message_received'
@@ -1128,7 +1129,7 @@ export async function transitionTaskStatus(
       emittedEvent = await appendTeamEvent(
         teamName,
         {
-          type: 'worker_stopped',
+          type: 'task_failed',
           worker: updated.owner || 'unknown',
           task_id: updated.id,
           message_id: null,

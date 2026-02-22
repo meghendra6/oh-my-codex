@@ -212,6 +212,28 @@ describe('team state', () => {
     }
   });
 
+  it('transitionTaskStatus appends task_failed event (not worker_stopped) when task fails', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-failed-'));
+    try {
+      await initTeamState('team-failed', 't', 'executor', 1, cwd);
+      const t = await createTask('team-failed', { subject: 'a', description: 'd', status: 'pending' }, cwd);
+      const claim = await claimTask('team-failed', t.id, 'worker-1', t.version ?? 1, cwd);
+      assert.equal(claim.ok, true);
+      const token = claim.ok ? claim.claimToken : 'x';
+
+      const tr = await transitionTaskStatus('team-failed', t.id, 'in_progress', 'failed', token, cwd);
+      assert.equal(tr.ok, true);
+
+      const eventsPath = join(cwd, '.omx', 'state', 'team', 'team-failed', 'events', 'events.ndjson');
+      const content = await readFile(eventsPath, 'utf-8');
+      assert.match(content, /\"type\":\"task_failed\"/);
+      assert.match(content, new RegExp(`\"task_id\":\"${t.id}\"`));
+      assert.doesNotMatch(content, /\"type\":\"worker_stopped\"/);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('releaseTaskClaim reverts a claimed task back to pending under claim lock', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-release-'));
     try {
