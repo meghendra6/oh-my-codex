@@ -351,6 +351,40 @@ describe('state-server team comm tools', () => {
       const reclaimJson = JSON.parse(reclaimResp.content[0]?.text || '{}') as { ok?: boolean; error?: string };
       assert.equal(reclaimJson.ok, false);
       assert.equal(reclaimJson.error, 'already_terminal');
+
+      // Attempting to regress a terminal task back to non-terminal via transition must be rejected
+      const regressResp = await handleStateToolCall({
+        params: {
+          name: 'team_transition_task_status',
+          arguments: {
+            team_name: 'delta-team',
+            task_id: '1',
+            from: 'completed',
+            to: 'pending',
+            claim_token: claimJson.claimToken,
+            workingDirectory: wd,
+          },
+        },
+      });
+      const regressJson = JSON.parse(regressResp.content[0]?.text || '{}') as { ok?: boolean; error?: string };
+      assert.equal(regressJson.ok, false);
+      assert.equal(regressJson.error, 'already_terminal');
+
+      // Verify the task remains completed with no stale claim data
+      const verifyResp = await handleStateToolCall({
+        params: {
+          name: 'team_read_task',
+          arguments: {
+            team_name: 'delta-team',
+            task_id: '1',
+            workingDirectory: wd,
+          },
+        },
+      });
+      const verifyJson = JSON.parse(verifyResp.content[0]?.text || '{}') as { ok?: boolean; task?: { status?: string; claim?: unknown } };
+      assert.equal(verifyJson.ok, true);
+      assert.equal(verifyJson.task?.status, 'completed');
+      assert.equal(verifyJson.task?.claim, undefined);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }

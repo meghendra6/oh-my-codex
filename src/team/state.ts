@@ -165,7 +165,7 @@ export type ClaimTaskResult =
 
 export type TransitionTaskResult =
   | { ok: true; task: TeamTaskV2 }
-  | { ok: false; error: 'claim_conflict' | 'invalid_transition' | 'task_not_found' };
+  | { ok: false; error: 'claim_conflict' | 'invalid_transition' | 'task_not_found' | 'already_terminal' };
 
 export type ReleaseTaskClaimResult =
   | { ok: true; task: TeamTaskV2 }
@@ -1113,6 +1113,9 @@ export async function transitionTaskStatus(
     if (!current) return { ok: false as const, error: 'task_not_found' as const };
     const v = normalizeTask(current);
 
+    if (v.status === 'completed' || v.status === 'failed') {
+      return { ok: false as const, error: 'already_terminal' as const };
+    }
     if (v.status !== from) return { ok: false as const, error: 'invalid_transition' as const };
     if (!v.claim || v.claim.token !== claimToken) return { ok: false as const, error: 'claim_conflict' as const };
 
