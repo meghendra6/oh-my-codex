@@ -14,7 +14,7 @@
  */
 
 import { writeFile, appendFile, mkdir, readFile, rename } from 'fs/promises';
-import { join, resolve as resolvePath } from 'path';
+import { dirname, join, resolve as resolvePath } from 'path';
 import { existsSync } from 'fs';
 import { spawn } from 'child_process';
 import { homedir } from 'os';
@@ -1114,6 +1114,56 @@ function parseTeamWorkerEnv(rawValue) {
   return { teamName: match[1], workerName: match[2] };
 }
 
+async function readTeamStateRootFromJson(path) {
+  try {
+    if (!existsSync(path)) return null;
+    const parsed = JSON.parse(await readFile(path, 'utf-8'));
+    const value = parsed && typeof parsed.team_state_root === 'string'
+      ? parsed.team_state_root.trim()
+      : '';
+    return value ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveTeamStateDirForWorker(cwd, parsedTeamWorker) {
+  const explicitStateRoot = safeString(process.env.OMX_TEAM_STATE_ROOT || '').trim();
+  if (explicitStateRoot) {
+    return resolvePath(cwd, explicitStateRoot);
+  }
+
+  const teamName = parsedTeamWorker.teamName;
+  const workerName = parsedTeamWorker.workerName;
+  const leaderCwd = safeString(process.env.OMX_TEAM_LEADER_CWD || '').trim();
+
+  const candidateStateDirs = [];
+  if (leaderCwd) {
+    candidateStateDirs.push(join(resolvePath(leaderCwd), '.omx', 'state'));
+  }
+  candidateStateDirs.push(join(cwd, '.omx', 'state'));
+
+  for (const candidateStateDir of candidateStateDirs) {
+    const teamRoot = join(candidateStateDir, 'team', teamName);
+    if (!existsSync(teamRoot)) continue;
+
+    const identityRoot = await readTeamStateRootFromJson(
+      join(teamRoot, 'workers', workerName, 'identity.json'),
+    );
+    if (identityRoot) return resolvePath(cwd, identityRoot);
+
+    const manifestRoot = await readTeamStateRootFromJson(join(teamRoot, 'manifest.v2.json'));
+    if (manifestRoot) return resolvePath(cwd, manifestRoot);
+
+    const configRoot = await readTeamStateRootFromJson(join(teamRoot, 'config.json'));
+    if (configRoot) return resolvePath(cwd, configRoot);
+
+    return candidateStateDir;
+  }
+
+  return join(cwd, '.omx', 'state');
+}
+
 function resolveAllWorkersIdleCooldownMs() {
   const raw = safeString(process.env.OMX_TEAM_ALL_IDLE_COOLDOWN_MS || '');
   const parsed = asNumber(raw);
@@ -1271,9 +1321,14 @@ async function main() {
   }
 
   const cwd = payload.cwd || payload['cwd'] || process.cwd();
-  const omxDir = join(cwd, '.omx');
-  const logsDir = join(omxDir, 'logs');
-  const stateDir = join(omxDir, 'state');
+  const teamWorkerEnv = process.env.OMX_TEAM_WORKER; // e.g., "fix-ts/worker-1"
+  const parsedTeamWorker = parseTeamWorkerEnv(teamWorkerEnv);
+  const isTeamWorker = !!parsedTeamWorker;
+  const stateDir = (isTeamWorker && parsedTeamWorker)
+    ? await resolveTeamStateDirForWorker(cwd, parsedTeamWorker)
+    : join(cwd, '.omx', 'state');
+  const logsDir = join(cwd, '.omx', 'logs');
+  const omxDir = dirname(stateDir);
 
   // Ensure directories exist
   await mkdir(logsDir, { recursive: true }).catch(() => {});
@@ -1301,11 +1356,6 @@ async function main() {
   } catch {
     // Non-critical
   }
-
-  // Team worker detection via environment variable
-  const teamWorkerEnv = process.env.OMX_TEAM_WORKER; // e.g., "fix-ts/worker-1"
-  const parsedTeamWorker = parseTeamWorkerEnv(teamWorkerEnv);
-  const isTeamWorker = !!parsedTeamWorker;
 
   // 1. Log the turn
   const logEntry = {
