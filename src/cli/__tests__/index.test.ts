@@ -367,6 +367,14 @@ describe('detached tmux new-session sequencing', () => {
     assert.equal(names.includes('set-wsl-xt'), true);
   });
 
+  it('buildDetachedSessionFinalizeSteps keeps extkeys setup even when mouse is disabled', () => {
+    const steps = buildDetachedSessionFinalizeSteps('omx-demo', '%12', '3', false, false);
+    const names = steps.map((step) => step.name);
+    assert.equal(names.includes('set-mouse'), false);
+    assert.equal(names.includes('set-extended-keys'), true);
+    assert.equal(names.includes('set-extkeys-feature'), true);
+  });
+
   it('buildDetachedSessionRollbackSteps unregisters hooks before killing session', () => {
     const steps = buildDetachedSessionRollbackSteps(
       'omx-demo',

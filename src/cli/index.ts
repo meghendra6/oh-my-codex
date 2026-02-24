@@ -42,6 +42,7 @@ import {
   buildScheduleDelayedHudResizeArgs,
   buildUnregisterClientAttachedReconcileArgs,
   buildUnregisterResizeHookArgs,
+  enableExtendedKeys,
   enableMouseScrolling,
   isNativeWindows,
   isWsl2,
@@ -762,16 +763,16 @@ export function buildDetachedSessionFinalizeSteps(
 
   if (enableMouse) {
     steps.push({ name: 'set-mouse', args: ['set-option', '-t', sessionName, 'mouse', 'on'] });
-    const extkeySetup = buildExtendedKeysSetupCommands(wsl2);
-    if (extkeySetup[0]) {
-      steps.push({ name: 'set-extended-keys', args: extkeySetup[0] });
-    }
-    if (extkeySetup[1]) {
-      steps.push({ name: 'set-extkeys-feature', args: extkeySetup[1] });
-    }
-    if (extkeySetup[2]) {
-      steps.push({ name: 'set-wsl-xt', args: extkeySetup[2] });
-    }
+  }
+  const extkeySetup = buildExtendedKeysSetupCommands(wsl2);
+  if (extkeySetup[0]) {
+    steps.push({ name: 'set-extended-keys', args: extkeySetup[0] });
+  }
+  if (extkeySetup[1]) {
+    steps.push({ name: 'set-extkeys-feature', args: extkeySetup[1] });
+  }
+  if (extkeySetup[2]) {
+    steps.push({ name: 'set-wsl-xt', args: extkeySetup[2] });
   }
   steps.push({ name: 'attach-session', args: ['attach-session', '-t', sessionName] });
   return steps;
@@ -906,16 +907,23 @@ function runCodex(cwd: string, args: string[], sessionId: string, workerDefaultM
       // HUD split failed, continue without it
     }
 
+    // Apply extkeys at session start so Shift+Enter-style modified keys work
+    // even when mouse behavior is explicitly disabled.
+    let tmuxSession = '';
+    try {
+      tmuxSession = execFileSync('tmux', ['display-message', '-p', '#S'], { encoding: 'utf-8' }).trim();
+      if (tmuxSession) {
+        enableExtendedKeys(isWsl2());
+      }
+    } catch {
+      // Non-fatal
+    }
+
     // Enable mouse scrolling at session start so scroll works before team
     // expansion. Previously this was only called from createTeamSession().
     // Opt-out: set OMX_MOUSE=0. (closes #128)
-    if (process.env.OMX_MOUSE !== '0') {
-      try {
-        const tmuxSession = execFileSync('tmux', ['display-message', '-p', '#S'], { encoding: 'utf-8' }).trim();
-        if (tmuxSession) enableMouseScrolling(tmuxSession);
-      } catch {
-        // Non-fatal: mouse scrolling is a convenience feature
-      }
+    if (tmuxSession && process.env.OMX_MOUSE !== '0') {
+      enableMouseScrolling(tmuxSession);
     }
 
     try {

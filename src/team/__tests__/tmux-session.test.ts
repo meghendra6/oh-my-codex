@@ -17,6 +17,7 @@ import {
   buildHudPaneTarget,
   chooseTeamLeaderPaneId,
   createTeamSession,
+  enableExtendedKeys,
   enableMouseScrolling,
   isNativeWindows,
   isTmuxAvailable,
@@ -974,6 +975,20 @@ describe('buildExtendedKeysSetupCommands', () => {
       ['set-option', '-sa', 'terminal-features', ',*:extkeys'],
       ['set-option', '-ga', 'terminal-overrides', ',xterm*:XT'],
     ]);
+  });
+});
+
+describe('enableExtendedKeys', () => {
+  it('returns false when tmux is unavailable', () => {
+    withEmptyPath(() => {
+      assert.equal(enableExtendedKeys(false), false);
+    });
+  });
+
+  it('does not throw in WSL2 mode when tmux is unavailable', () => {
+    withEmptyPath(() => {
+      assert.doesNotThrow(() => enableExtendedKeys(true));
+    });
   });
 });
 

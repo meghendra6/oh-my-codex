@@ -642,6 +642,10 @@ export function createTeamSession(
     runTmux(['select-pane', '-t', leaderPaneId]);
     sleepSeconds(0.5);
 
+    // Apply extkeys globally regardless of mouse opt-out so Shift+Enter-style
+    // modified keys still work in Codex inside tmux.
+    enableExtendedKeys(isWsl2());
+
     // Enable mouse scrolling so agent output panes can be scrolled with the
     // mouse wheel without conflicting with keyboard up/down arrow-key input
     // history navigation in the Codex CLI input field. (issue #103)
@@ -729,21 +733,25 @@ export function buildExtendedKeysSetupCommands(wsl2: boolean): Array<string[]> {
 }
 
 /**
+ * Apply global tmux extended-key forwarding options so modified keys (for
+ * example Shift+Enter) can reach terminal apps running inside tmux.
+ */
+export function enableExtendedKeys(wsl2: boolean): boolean {
+  let ok = true;
+  for (const command of buildExtendedKeysSetupCommands(wsl2)) {
+    if (!runTmux(command).ok) ok = false;
+  }
+  return ok;
+}
+
+/**
  * Enable tmux mouse mode for a session so users can scroll pane content
  * (e.g. long agent output) with the mouse wheel instead of arrow keys.
  * Arrow keys remain reserved for Codex CLI input-history navigation.
- * Also enables tmux extended-keys forwarding so modified keys (e.g.
- * Shift+Enter on extkeys-capable terminals) are preserved.
  *
  * Also configures viewport scrolling via copy-mode on wheel-up and clipboard
  * copy on mouse selection, fixing scroll and copy issues in --xhigh and
  * --madmax modes. (closes #206)
- *
- * In WSL2, Windows Terminal uses the SGR mouse protocol but tmux will not
- * activate it unless the terminal advertises the XT capability. Without XT,
- * scroll wheel events are silently dropped. When a WSL2 environment is
- * detected the global terminal-overrides are extended with xterm*:XT so
- * that tmux negotiates the correct protocol with the host terminal. (closes #113)
  *
  * Returns true if the option was set successfully, false otherwise.
  */
@@ -758,9 +766,6 @@ export function enableMouseScrolling(sessionTarget: string): boolean {
   // Apply the scroll-into-copy-mode and mouse-copy bindings. (closes #206)
   for (const binding of buildScrollCopyBindings()) {
     runTmux(binding);
-  }
-  for (const command of buildExtendedKeysSetupCommands(isWsl2())) {
-    runTmux(command);
   }
 
   return true;
