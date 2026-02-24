@@ -14,9 +14,9 @@ describe('sanitizeReplyInput', () => {
     assert.equal(sanitizeReplyInput('test\x1bescseq'), 'testescseq');
   });
 
-  it('replaces newlines with spaces', () => {
-    assert.equal(sanitizeReplyInput('line1\nline2'), 'line1 line2');
-    assert.equal(sanitizeReplyInput('line1\r\nline2'), 'line1 line2');
+  it('preserves newlines and normalizes CRLF to LF', () => {
+    assert.equal(sanitizeReplyInput('line1\nline2'), 'line1\nline2');
+    assert.equal(sanitizeReplyInput('line1\r\nline2'), 'line1\nline2');
   });
 
   it('escapes backslashes', () => {
@@ -50,8 +50,8 @@ describe('sanitizeReplyInput', () => {
   it('handles combined dangerous patterns', () => {
     const input = '$(rm -rf /) && `evil` ${PATH}\nmore';
     const result = sanitizeReplyInput(input);
-    // Should not contain unescaped backticks or newlines
-    assert.ok(!result.includes('\n'));
+    // Should not contain unescaped backticks
+    assert.ok(result.includes('\n'));
     // $( should be escaped to \$(
     assert.ok(result.includes('\\$('));
     // ${ should be escaped to \${

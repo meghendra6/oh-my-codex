@@ -140,13 +140,25 @@ describe('buildSendPaneArgvs', () => {
     assert.ok(!argvs[0].includes('C-m'), 'no C-m when pressEnter=false');
   });
 
-  it('strips newlines from text to prevent literal Enter injection via -l', () => {
+  it('preserves multiline input by splitting literal chunks with non-submit newline keys', () => {
     const argvs = buildSendPaneArgvs('%3', 'line1\nline2\r\nline3', false);
-    const textArgv = argvs[0];
-    const text = textArgv[textArgv.length - 1];
-    assert.ok(!text.includes('\n'), 'newline must be stripped');
-    assert.ok(!text.includes('\r'), 'carriage return must be stripped');
-    assert.ok(text.includes('line1'), 'text content must be preserved');
+    assert.deepEqual(argvs, [
+      ['send-keys', '-t', '%3', '-l', '--', 'line1'],
+      ['send-keys', '-t', '%3', 'C-j'],
+      ['send-keys', '-t', '%3', '-l', '--', 'line2'],
+      ['send-keys', '-t', '%3', 'C-j'],
+      ['send-keys', '-t', '%3', '-l', '--', 'line3'],
+    ]);
+  });
+
+  it('keeps newline keys isolated from submit keys', () => {
+    const argvs = buildSendPaneArgvs('%3', 'line1\nline2', true);
+    const submitArgvs = argvs.slice(-2);
+    const intermediate = argvs.slice(0, -2);
+    assert.ok(intermediate.some(argv => argv.includes('C-j')), 'expected non-submit newline key between chunks');
+    for (const argv of submitArgvs) {
+      assert.deepEqual(argv, ['send-keys', '-t', '%3', 'C-m']);
+    }
   });
 
   it('targets the correct pane in every argv', () => {

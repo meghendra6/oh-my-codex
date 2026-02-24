@@ -7,7 +7,7 @@
  * Security considerations:
  * - State/PID/log files use restrictive permissions (0600)
  * - Bot tokens stored in state file, NOT in environment variables
- * - Two-layer input sanitization (sanitizeReplyInput + newline stripping in buildSendPaneArgvs)
+ * - Two-layer input safety (sanitizeReplyInput + literal chunked send in buildSendPaneArgvs)
  * - Pane verification via analyzePaneContent before every injection
  * - Authorization: only configured user IDs (Discord) / chat ID (Telegram) can inject
  * - Rate limiting to prevent spam/abuse
@@ -242,7 +242,7 @@ export function isDaemonRunning(): boolean {
 export function sanitizeReplyInput(text: string): string {
   return text
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '')
-    .replace(/\r?\n/g, ' ')
+    .replace(/\r\n?/g, '\n')
     .replace(/\\/g, '\\\\')
     .replace(/`/g, '\\`')
     .replace(/\$\(/g, '\\$(')
