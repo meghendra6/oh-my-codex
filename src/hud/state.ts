@@ -10,6 +10,7 @@ import { execSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { omxStateDir } from '../utils/paths.js';
+import { getReadScopedStatePaths } from '../mcp/state-paths.js';
 import type {
   RalphStateForHud,
   UltraworkStateForHud,
@@ -34,33 +35,42 @@ async function readJsonFile<T>(path: string): Promise<T | null> {
   }
 }
 
+async function readScopedModeState<T>(cwd: string, mode: string): Promise<T | null> {
+  const candidates = await getReadScopedStatePaths(mode, cwd);
+  for (const candidate of candidates) {
+    const state = await readJsonFile<T>(candidate);
+    if (state) return state;
+  }
+  return null;
+}
+
 export async function readRalphState(cwd: string): Promise<RalphStateForHud | null> {
-  const state = await readJsonFile<RalphStateForHud>(join(omxStateDir(cwd), 'ralph-state.json'));
+  const state = await readScopedModeState<RalphStateForHud>(cwd, 'ralph');
   return state?.active ? state : null;
 }
 
 export async function readUltraworkState(cwd: string): Promise<UltraworkStateForHud | null> {
-  const state = await readJsonFile<UltraworkStateForHud>(join(omxStateDir(cwd), 'ultrawork-state.json'));
+  const state = await readScopedModeState<UltraworkStateForHud>(cwd, 'ultrawork');
   return state?.active ? state : null;
 }
 
 export async function readAutopilotState(cwd: string): Promise<AutopilotStateForHud | null> {
-  const state = await readJsonFile<AutopilotStateForHud>(join(omxStateDir(cwd), 'autopilot-state.json'));
+  const state = await readScopedModeState<AutopilotStateForHud>(cwd, 'autopilot');
   return state?.active ? state : null;
 }
 
 export async function readTeamState(cwd: string): Promise<TeamStateForHud | null> {
-  const state = await readJsonFile<TeamStateForHud>(join(omxStateDir(cwd), 'team-state.json'));
+  const state = await readScopedModeState<TeamStateForHud>(cwd, 'team');
   return state?.active ? state : null;
 }
 
 export async function readEcomodeState(cwd: string): Promise<EcomodeStateForHud | null> {
-  const state = await readJsonFile<EcomodeStateForHud>(join(omxStateDir(cwd), 'ecomode-state.json'));
+  const state = await readScopedModeState<EcomodeStateForHud>(cwd, 'ecomode');
   return state?.active ? state : null;
 }
 
 export async function readPipelineState(cwd: string): Promise<PipelineStateForHud | null> {
-  const state = await readJsonFile<PipelineStateForHud>(join(omxStateDir(cwd), 'pipeline-state.json'));
+  const state = await readScopedModeState<PipelineStateForHud>(cwd, 'pipeline');
   return state?.active ? state : null;
 }
 

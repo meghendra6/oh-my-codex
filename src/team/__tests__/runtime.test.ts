@@ -14,6 +14,8 @@ import {
   writeAtomic,
   readTask,
   readMonitorSnapshot,
+  claimTask,
+  transitionTaskStatus,
 } from '../state.js';
 import {
   monitorTeam,
@@ -23,6 +25,7 @@ import {
   assignTask,
   sendWorkerMessage,
   resolveWorkerLaunchArgsFromEnv,
+  resolveCanonicalTeamStateRoot,
   TEAM_LOW_COMPLEXITY_DEFAULT_MODEL,
 } from '../runtime.js';
 
@@ -48,6 +51,13 @@ function withoutTeamWorkerEnv<T>(fn: () => T): T {
 }
 
 describe('runtime', () => {
+  it('resolveCanonicalTeamStateRoot resolves to leader .omx/state', () => {
+    assert.equal(
+      resolveCanonicalTeamStateRoot('/tmp/demo/project'),
+      '/tmp/demo/project/.omx/state',
+    );
+  });
+
   it('resolveWorkerLaunchArgsFromEnv injects low-complexity default model when missing', () => {
     const args = resolveWorkerLaunchArgsFromEnv(
       { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
@@ -56,12 +66,12 @@ describe('runtime', () => {
     assert.deepEqual(args, ['--no-alt-screen', '--model', TEAM_LOW_COMPLEXITY_DEFAULT_MODEL]);
   });
 
-  it('resolveWorkerLaunchArgsFromEnv injects default model for all agent types', () => {
+  it('resolveWorkerLaunchArgsFromEnv does not inject low-complexity default for standard agent types', () => {
     const args = resolveWorkerLaunchArgsFromEnv(
       { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
       'executor',
     );
-    assert.deepEqual(args, ['--no-alt-screen', '--model', TEAM_LOW_COMPLEXITY_DEFAULT_MODEL]);
+    assert.deepEqual(args, ['--no-alt-screen']);
   });
 
   it('resolveWorkerLaunchArgsFromEnv treats *-low aliases as low complexity', () => {
@@ -79,11 +89,11 @@ describe('runtime', () => {
     );
     assert.deepEqual(
       resolveWorkerLaunchArgsFromEnv({ OMX_TEAM_WORKER_LAUNCH_ARGS: '--model=gpt-5.3' }, 'explore'),
-      ['--model=gpt-5.3'],
+      ['--model', 'gpt-5.3'],
     );
   });
 
-  it('resolveWorkerLaunchArgsFromEnv uses configured model for all agent types', () => {
+  it('resolveWorkerLaunchArgsFromEnv uses inherited leader model for all agent types', () => {
     const args = resolveWorkerLaunchArgsFromEnv(
       { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
       'executor',
@@ -92,7 +102,7 @@ describe('runtime', () => {
     assert.deepEqual(args, ['--no-alt-screen', '--model', 'gpt-4.1']);
   });
 
-  it('resolveWorkerLaunchArgsFromEnv uses configured model over hardcoded default for low-complexity', () => {
+  it('resolveWorkerLaunchArgsFromEnv uses inherited leader model over low-complexity default', () => {
     const args = resolveWorkerLaunchArgsFromEnv(
       { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
       'explore',
@@ -101,11 +111,91 @@ describe('runtime', () => {
     assert.deepEqual(args, ['--no-alt-screen', '--model', 'gpt-4.1']);
   });
 
-  it('resolveWorkerLaunchArgsFromEnv prefers explicit env model over configured model', () => {
+  it('resolveWorkerLaunchArgsFromEnv prefers explicit env model over inherited leader model', () => {
     assert.deepEqual(
       resolveWorkerLaunchArgsFromEnv({ OMX_TEAM_WORKER_LAUNCH_ARGS: '--model gpt-5' }, 'explore', 'gpt-4.1'),
       ['--model', 'gpt-5'],
     );
+  });
+
+  it('resolveWorkerLaunchArgsFromEnv preserves explicit reasoning and logs source=explicit', () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
+    try {
+      const args = resolveWorkerLaunchArgsFromEnv(
+        { OMX_TEAM_WORKER_LAUNCH_ARGS: '-c model_reasoning_effort=\"high\" --no-alt-screen' },
+        'explore',
+      );
+      assert.deepEqual(
+        args,
+        ['--no-alt-screen', '-c', 'model_reasoning_effort="high"', '--model', TEAM_LOW_COMPLEXITY_DEFAULT_MODEL],
+      );
+    } finally {
+      console.log = originalLog;
+    }
+    assert.ok(logs.some((line) => line.includes('thinking_level=high') && line.includes('source=explicit')));
+  });
+
+  it('resolveWorkerLaunchArgsFromEnv logs model=claude without thinking_level for claude CLI', () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
+    try {
+      const args = resolveWorkerLaunchArgsFromEnv(
+        {
+          OMX_TEAM_WORKER_CLI: 'claude',
+          OMX_TEAM_WORKER_LAUNCH_ARGS: '-c model_reasoning_effort="high" --no-alt-screen',
+        },
+        'explore',
+      );
+      assert.deepEqual(
+        args,
+        ['--no-alt-screen', '-c', 'model_reasoning_effort="high"', '--model', TEAM_LOW_COMPLEXITY_DEFAULT_MODEL],
+      );
+    } finally {
+      console.log = originalLog;
+    }
+    const startupLog = logs.find((line) => line.includes('worker startup resolution:'));
+    assert.ok(startupLog);
+    assert.match(startupLog, /model=claude/);
+    assert.match(startupLog, /source=local-settings/);
+    assert.doesNotMatch(startupLog, /thinking_level=/);
+  });
+
+  it('resolveWorkerLaunchArgsFromEnv keeps codex thinking_level logging for mixed CLI maps', () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
+    try {
+      const args = resolveWorkerLaunchArgsFromEnv(
+        {
+          OMX_TEAM_WORKER_CLI_MAP: 'codex,claude',
+          OMX_TEAM_WORKER_LAUNCH_ARGS: '-c model_reasoning_effort="high" --model claude-3-7-sonnet',
+        },
+        'executor',
+      );
+      assert.deepEqual(args, ['-c', 'model_reasoning_effort="high"', '--model', 'claude-3-7-sonnet']);
+    } finally {
+      console.log = originalLog;
+    }
+    assert.ok(logs.some((line) => line.includes('thinking_level=high') && line.includes('source=explicit')));
+  });
+
+  it('resolveWorkerLaunchArgsFromEnv logs source=none/default-none when thinking is not explicit', () => {
+    const logs: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: unknown[]) => { logs.push(args.join(' ')); };
+    try {
+      const args = resolveWorkerLaunchArgsFromEnv(
+        { OMX_TEAM_WORKER_LAUNCH_ARGS: '--no-alt-screen' },
+        'explore',
+      );
+      assert.deepEqual(args, ['--no-alt-screen', '--model', TEAM_LOW_COMPLEXITY_DEFAULT_MODEL]);
+    } finally {
+      console.log = originalLog;
+    }
+    assert.ok(logs.some((line) => line.includes('thinking_level=none') && line.includes('source=none/default-none')));
   });
 
   it('startTeam rejects nested team invocation inside worker context', async () => {
@@ -248,6 +338,29 @@ describe('runtime', () => {
       await shutdownTeam('team-shutdown', cwd);
 
       const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-shutdown');
+      assert.equal(existsSync(teamRoot), false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('shutdownTeam handles persisted resize hook metadata during cleanup', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-resize-meta-'));
+    try {
+      const configPath = join(cwd, '.omx', 'state', 'team', 'team-resize-meta', 'config.json');
+      const manifestPath = join(cwd, '.omx', 'state', 'team', 'team-resize-meta', 'manifest.v2.json');
+      await initTeamState('team-resize-meta', 'shutdown resize metadata', 'executor', 1, cwd);
+      const config = JSON.parse(await readFile(configPath, 'utf-8')) as Record<string, unknown>;
+      config.resize_hook_name = 'omx_resize_team_resize_meta_test';
+      config.resize_hook_target = 'omx-team-team-resize-meta:0';
+      await writeFile(configPath, JSON.stringify(config, null, 2));
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf-8')) as Record<string, unknown>;
+      manifest.resize_hook_name = 'omx_resize_team_resize_meta_test';
+      manifest.resize_hook_target = 'omx-team-team-resize-meta:0';
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+      await shutdownTeam('team-resize-meta', cwd);
+      const teamRoot = join(cwd, '.omx', 'state', 'team', 'team-resize-meta');
       assert.equal(existsSync(teamRoot), false);
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -657,6 +770,35 @@ describe('runtime', () => {
         diskSnap3.mailboxNotifiedByMessageId['msg-unnotified'],
         'notified message must remain in snapshot on third poll (no duplicate notification)',
       );
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('monitorTeam does not emit duplicate task_completed when transitionTaskStatus completed the task first (issue #161)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-no-dup-'));
+    try {
+      await initTeamState('team-no-dup', 'dedup test', 'executor', 1, cwd);
+      const t = await createTask('team-no-dup', { subject: 'task', description: 'd', status: 'pending' }, cwd);
+
+      // Establish a baseline snapshot (task is pending).
+      await monitorTeam('team-no-dup', cwd);
+
+      // Complete the task via the claim-safe path — this emits the first task_completed event
+      // and records the task ID in the monitor snapshot.
+      const claim = await claimTask('team-no-dup', t.id, 'worker-1', null, cwd);
+      assert.ok(claim.ok);
+      if (!claim.ok) throw new Error('claim failed');
+      await transitionTaskStatus('team-no-dup', t.id, 'in_progress', 'completed', claim.claimToken, cwd);
+
+      // Run monitorTeam again — it must NOT emit a second task_completed event.
+      await monitorTeam('team-no-dup', cwd);
+
+      const eventsPath = join(cwd, '.omx', 'state', 'team', 'team-no-dup', 'events', 'events.ndjson');
+      const content = await readFile(eventsPath, 'utf-8');
+      const events = content.trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+      const completedEvents = events.filter((e: { type: string }) => e.type === 'task_completed');
+      assert.equal(completedEvents.length, 1, 'should have exactly one task_completed event');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

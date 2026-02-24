@@ -1,10 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   normalizeCodexLaunchArgs,
   buildTmuxShellCommand,
   buildTmuxSessionName,
-  launchOutsideTmuxSession,
   resolveCliInvocation,
   resolveCodexLaunchPolicy,
   parseTmuxPaneSnapshot,
@@ -15,8 +17,15 @@ import {
   collectInheritableTeamWorkerArgs,
   resolveTeamWorkerLaunchArgsEnv,
   injectModelInstructionsBypassArgs,
+  resolveWorkerSparkModel,
+  resolveSetupScopeArg,
+  readPersistedSetupScope,
+  resolveCodexHomeForLaunch,
+  buildDetachedSessionBootstrapSteps,
+  buildDetachedSessionFinalizeSteps,
+  buildDetachedSessionRollbackSteps,
 } from '../index.js';
-import { resolveHudPaneLines } from '../../utils/tmux-layout.js';
+import { HUD_TMUX_HEIGHT_LINES } from '../../hud/constants.js';
 
 describe('normalizeCodexLaunchArgs', () => {
   it('maps --madmax to codex bypass flag', () => {
@@ -89,6 +98,92 @@ describe('normalizeCodexLaunchArgs', () => {
       ['--dangerously-bypass-approvals-and-sandbox', '-c', 'model_reasoning_effort="xhigh"']
     );
   });
+
+  it('--spark is stripped from leader args (model goes to workers only)', () => {
+    assert.deepEqual(
+      normalizeCodexLaunchArgs(['--spark', '--yolo']),
+      ['--yolo']
+    );
+  });
+
+  it('--spark alone produces no leader args', () => {
+    assert.deepEqual(normalizeCodexLaunchArgs(['--spark']), []);
+  });
+
+  it('--madmax-spark adds bypass flag to leader args and is otherwise consumed', () => {
+    assert.deepEqual(
+      normalizeCodexLaunchArgs(['--madmax-spark']),
+      ['--dangerously-bypass-approvals-and-sandbox']
+    );
+  });
+
+  it('--madmax-spark deduplicates bypass when --madmax also present', () => {
+    assert.deepEqual(
+      normalizeCodexLaunchArgs(['--madmax', '--madmax-spark']),
+      ['--dangerously-bypass-approvals-and-sandbox']
+    );
+  });
+
+  it('--madmax-spark does not inject spark model into leader args', () => {
+    const args = normalizeCodexLaunchArgs(['--madmax-spark']);
+    assert.ok(!args.includes('--model'), 'leader args must not contain --model from --madmax-spark');
+    assert.ok(!args.some(a => a.includes('spark')), 'leader args must not reference spark model');
+  });
+
+  it('strips detached worktree flag from leader codex args', () => {
+    assert.deepEqual(
+      normalizeCodexLaunchArgs(['--worktree', '--yolo']),
+      ['--yolo'],
+    );
+  });
+
+  it('strips named worktree flag from leader codex args', () => {
+    assert.deepEqual(
+      normalizeCodexLaunchArgs(['--worktree=feature/demo', '--model', 'gpt-5']),
+      ['--model', 'gpt-5'],
+    );
+  });
+});
+
+describe('resolveWorkerSparkModel', () => {
+  it('returns spark model string when --spark is present', () => {
+    assert.equal(resolveWorkerSparkModel(['--spark', '--yolo']), 'gpt-5.3-codex-spark');
+  });
+
+  it('returns spark model string when --madmax-spark is present', () => {
+    assert.equal(resolveWorkerSparkModel(['--madmax-spark']), 'gpt-5.3-codex-spark');
+  });
+
+  it('returns undefined when neither spark flag is present', () => {
+    assert.equal(resolveWorkerSparkModel(['--madmax', '--yolo', '--model', 'gpt-5']), undefined);
+  });
+
+  it('returns undefined for empty args', () => {
+    assert.equal(resolveWorkerSparkModel([]), undefined);
+  });
+});
+
+describe('resolveTeamWorkerLaunchArgsEnv (spark)', () => {
+  it('injects spark model as worker default when no explicit env model', () => {
+    assert.equal(
+      resolveTeamWorkerLaunchArgsEnv(undefined, [], true, 'gpt-5.3-codex-spark'),
+      '--model gpt-5.3-codex-spark'
+    );
+  });
+
+  it('explicit env model overrides spark default', () => {
+    assert.equal(
+      resolveTeamWorkerLaunchArgsEnv('--model gpt-5', [], true, 'gpt-5.3-codex-spark'),
+      '--model gpt-5'
+    );
+  });
+
+  it('inherited leader model overrides spark default', () => {
+    assert.equal(
+      resolveTeamWorkerLaunchArgsEnv(undefined, ['--model', 'gpt-4.1'], true, 'gpt-5.3-codex-spark'),
+      '--model gpt-4.1'
+    );
+  });
 });
 
 describe('resolveCliInvocation', () => {
@@ -114,6 +209,80 @@ describe('resolveCliInvocation', () => {
   });
 });
 
+describe('resolveSetupScopeArg', () => {
+  it('returns undefined when scope is omitted', () => {
+    assert.equal(resolveSetupScopeArg(['--dry-run']), undefined);
+  });
+
+  it('parses --scope <value> form', () => {
+    assert.equal(resolveSetupScopeArg(['--dry-run', '--scope', 'project-local']), 'project-local');
+  });
+
+  it('parses --scope=<value> form', () => {
+    assert.equal(resolveSetupScopeArg(['--scope=project']), 'project');
+  });
+
+  it('throws on invalid scope value', () => {
+    assert.throws(
+      () => resolveSetupScopeArg(['--scope', 'workspace']),
+      /Invalid setup scope: workspace/
+    );
+  });
+
+  it('throws when --scope value is missing', () => {
+    assert.throws(
+      () => resolveSetupScopeArg(['--scope']),
+      /Missing setup scope value after --scope/
+    );
+  });
+});
+
+describe('project-local launch scope helpers', () => {
+  it('reads persisted setup scope when valid', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
+    try {
+      await mkdir(join(wd, '.omx'), { recursive: true });
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project-local' }));
+      assert.equal(readPersistedSetupScope(wd), 'project-local');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores malformed persisted setup scope', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
+    try {
+      await mkdir(join(wd, '.omx'), { recursive: true });
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), '{not-json');
+      assert.equal(readPersistedSetupScope(wd), undefined);
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('uses project-local CODEX_HOME when persisted scope is project-local', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
+    try {
+      await mkdir(join(wd, '.omx'), { recursive: true });
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project-local' }));
+      assert.equal(resolveCodexHomeForLaunch(wd, {}), join(wd, '.codex'));
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps explicit CODEX_HOME override from env', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
+    try {
+      await mkdir(join(wd, '.omx'), { recursive: true });
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project-local' }));
+      assert.equal(resolveCodexHomeForLaunch(wd, { CODEX_HOME: '/tmp/explicit-codex-home' }), '/tmp/explicit-codex-home');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('resolveCodexLaunchPolicy', () => {
   it('launches directly when outside tmux', () => {
     assert.equal(resolveCodexLaunchPolicy({}), 'direct');
@@ -121,149 +290,6 @@ describe('resolveCodexLaunchPolicy', () => {
 
   it('uses tmux-aware launch path when already inside tmux', () => {
     assert.equal(resolveCodexLaunchPolicy({ TMUX: '/tmp/tmux-1000/default,123,0' }), 'inside-tmux');
-  });
-});
-
-describe('launchOutsideTmuxSession', () => {
-  it('falls back when new-session fails', () => {
-    const calls: Array<{ file: string; args: readonly string[] }> = [];
-    const execTmux = ((file: string, args: readonly string[]) => {
-      calls.push({ file, args });
-      throw new Error('new-session failed');
-    }) as unknown as typeof import('child_process').execFileSync;
-
-    assert.equal(launchOutsideTmuxSession({
-      cwd: '/tmp/project',
-      sessionName: 'omx-session',
-      codexCmd: "'codex'",
-      hudCmd: "'hud'",
-      workerLaunchArgs: null,
-    }, execTmux), false);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0]?.args[0], 'new-session');
-  });
-
-  it('continues to attach when split/select fail and uses explicit targets', () => {
-    const calls: Array<{ file: string; args: readonly string[] }> = [];
-    const originalError = console.error;
-    const warnings: string[] = [];
-    console.error = (msg?: unknown) => { warnings.push(String(msg)); };
-    try {
-      const execTmux = ((file: string, args: readonly string[]) => {
-        calls.push({ file, args });
-        if (args[0] === 'new-session') return '%1\n';
-        if (args[0] === 'split-window') throw new Error('split failed');
-        if (args[0] === 'select-pane') throw new Error('select failed');
-        return Buffer.from('');
-      }) as unknown as typeof import('child_process').execFileSync;
-
-      assert.equal(launchOutsideTmuxSession({
-        cwd: '/tmp/project',
-        sessionName: 'omx-session',
-        codexCmd: "'codex'",
-        hudCmd: "'hud'",
-        workerLaunchArgs: null,
-      }, execTmux), true);
-    } finally {
-      console.error = originalError;
-    }
-
-    const split = calls.find((c) => c.args[0] === 'split-window');
-    const select = calls.find((c) => c.args[0] === 'select-pane');
-    const attach = calls.find((c) => c.args[0] === 'attach-session');
-    assert.ok(split);
-    assert.ok(select);
-    assert.ok(attach);
-    assert.ok(split?.args.includes('-t'));
-    assert.ok(split?.args.includes('%1'));
-    assert.ok(select?.args.includes('%1'));
-    assert.ok(warnings.some((w) => w.startsWith('[omx] warning: failed to create HUD pane in tmux; continuing without HUD.')));
-    assert.ok(warnings.some((w) => w.startsWith('[omx] warning: failed to focus leader pane; continuing.')));
-  });
-
-  it('falls back when attach-session fails', () => {
-    const calls: Array<{ file: string; args: readonly string[] }> = [];
-    const execTmux = ((file: string, args: readonly string[]) => {
-      calls.push({ file, args });
-      if (args[0] === 'new-session') return '%1\n';
-      if (args[0] === 'attach-session') throw new Error('attach failed');
-      return Buffer.from('');
-    }) as unknown as typeof import('child_process').execFileSync;
-
-    assert.equal(launchOutsideTmuxSession({
-      cwd: '/tmp/project',
-      sessionName: 'omx-session',
-      codexCmd: "'codex'",
-      hudCmd: "'hud'",
-      workerLaunchArgs: null,
-    }, execTmux), false);
-    assert.ok(calls.some((c) => c.args[0] === 'attach-session'));
-    assert.ok(calls.some((c) => c.args[0] === 'kill-session'));
-  });
-
-  it('uses shared HUD pane resolver for split height', () => {
-    const calls: Array<readonly string[]> = [];
-    const prev = process.env.OMX_HUD_PANE_LINES;
-    process.env.OMX_HUD_PANE_LINES = '9';
-    try {
-      const execTmux = ((_file: string, args: readonly string[]) => {
-        calls.push(args);
-        if (args[0] === 'new-session') return '%1\n';
-        return Buffer.from('');
-      }) as unknown as typeof import('child_process').execFileSync;
-
-      launchOutsideTmuxSession({
-        cwd: '/tmp/project',
-        sessionName: 'omx-session',
-        codexCmd: "'codex'",
-        hudCmd: "'hud'",
-        workerLaunchArgs: null,
-      }, execTmux);
-    } finally {
-      if (typeof prev === 'string') process.env.OMX_HUD_PANE_LINES = prev;
-      else delete process.env.OMX_HUD_PANE_LINES;
-    }
-
-    const split = calls.find((args) => args[0] === 'split-window');
-    assert.ok(split);
-    const lineIndex = split?.indexOf('-l') ?? -1;
-    assert.notEqual(lineIndex, -1);
-    assert.equal(split?.[lineIndex + 1], resolveHudPaneLines({ OMX_HUD_PANE_LINES: '9' }));
-  });
-
-  it('uses COLUMNS/LINES derived size flags for detached session', () => {
-    const calls: Array<readonly string[]> = [];
-    const prevColumns = process.env.COLUMNS;
-    const prevLines = process.env.LINES;
-    process.env.COLUMNS = '120';
-    process.env.LINES = '40';
-    try {
-      const execTmux = ((_file: string, args: readonly string[]) => {
-        calls.push(args);
-        if (args[0] === 'new-session') return '%1\n';
-        return Buffer.from('');
-      }) as unknown as typeof import('child_process').execFileSync;
-
-      launchOutsideTmuxSession({
-        cwd: '/tmp/project',
-        sessionName: 'omx-session',
-        codexCmd: "'codex'",
-        hudCmd: "'hud'",
-        workerLaunchArgs: null,
-      }, execTmux);
-    } finally {
-      if (typeof prevColumns === 'string') process.env.COLUMNS = prevColumns;
-      else delete process.env.COLUMNS;
-      if (typeof prevLines === 'string') process.env.LINES = prevLines;
-      else delete process.env.LINES;
-    }
-
-    const newSession = calls.find((args) => args[0] === 'new-session');
-    assert.ok(newSession);
-    assert.ok(newSession?.includes('-x'));
-    assert.ok(newSession?.includes('120'));
-    assert.ok(newSession?.includes('-y'));
-    assert.ok(newSession?.includes('40'));
   });
 });
 
@@ -296,6 +322,63 @@ describe('tmux HUD pane helpers', () => {
 
   it('buildHudPaneCleanupTargets is a no-op guard when leaderPaneId is absent', () => {
     assert.deepEqual(buildHudPaneCleanupTargets(['%3'], '%4'), ['%3', '%4']);
+  });
+});
+
+describe('detached tmux new-session sequencing', () => {
+  it('buildDetachedSessionBootstrapSteps uses shared HUD height and split-capture ordering', () => {
+    const steps = buildDetachedSessionBootstrapSteps(
+      'omx-demo',
+      '/tmp/project',
+      "'codex' '--model' 'gpt-5'",
+      "'node' '/tmp/omx.js' 'hud' '--watch'",
+      '--model gpt-5',
+      '/tmp/codex-home',
+    );
+    assert.deepEqual(steps.map((step) => step.name), ['new-session', 'split-and-capture-hud-pane']);
+    assert.equal(steps[1]?.args[3], String(HUD_TMUX_HEIGHT_LINES));
+    assert.equal(steps[1]?.args[6], 'omx-demo');
+    assert.equal(steps[1]?.args.includes('-P'), true);
+    assert.equal(steps[1]?.args.includes('#{pane_id}'), true);
+  });
+
+  it('buildDetachedSessionFinalizeSteps keeps schedule after split-capture and before attach', () => {
+    const steps = buildDetachedSessionFinalizeSteps('omx-demo', '%12', '3', true, false);
+    const names = steps.map((step) => step.name);
+    const attachedIndex = names.indexOf('register-client-attached-reconcile');
+    const scheduleIndex = names.indexOf('schedule-delayed-resize');
+    const attachIndex = names.indexOf('attach-session');
+    assert.equal(attachedIndex >= 0, true);
+    assert.equal(scheduleIndex > attachedIndex, true);
+    assert.equal(scheduleIndex >= 0, true);
+    assert.equal(attachIndex > scheduleIndex, true);
+    assert.equal(names.includes('register-resize-hook'), true);
+    assert.equal(names.includes('reconcile-hud-resize'), true);
+  });
+
+  it('buildDetachedSessionRollbackSteps unregisters hooks before killing session', () => {
+    const steps = buildDetachedSessionRollbackSteps(
+      'omx-demo',
+      'omx-demo:0',
+      'omx_resize_launch_demo_0_12',
+      'omx_attached_launch_demo_0_12',
+    );
+    assert.deepEqual(
+      steps.map((step) => step.name),
+      ['unregister-client-attached-reconcile', 'unregister-resize-hook', 'kill-session'],
+    );
+    assert.equal(steps[0]?.args[0], 'set-hook');
+    assert.equal(steps[0]?.args[1], '-u');
+    assert.equal(steps[0]?.args[2], '-t');
+    assert.equal(steps[0]?.args[3], 'omx-demo:0');
+    assert.match(steps[0]?.args[4] ?? '', /^client-attached\[\d+\]$/);
+    assert.match(steps[1]?.args[4] ?? '', /^client-resized\[\d+\]$/);
+    assert.deepEqual(steps[2]?.args, ['kill-session', '-t', 'omx-demo']);
+  });
+
+  it('buildDetachedSessionRollbackSteps only kills session when no hook metadata exists', () => {
+    const steps = buildDetachedSessionRollbackSteps('omx-demo', null, null, null);
+    assert.deepEqual(steps.map((step) => step.name), ['kill-session']);
   });
 });
 

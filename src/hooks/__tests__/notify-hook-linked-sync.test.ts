@@ -64,7 +64,7 @@ describe('notify-hook linked team -> ralph terminal sync', () => {
       });
       await writeJson(ralphStatePath, {
         active: true,
-        current_phase: 'execution',
+        current_phase: 'executing',
         linked_team: true,
       });
 
@@ -83,11 +83,13 @@ describe('notify-hook linked team -> ralph terminal sync', () => {
   it('updates session-scoped ralph state when linked session team enters terminal phase', async () => {
     await withTempWorkingDir(async (cwd) => {
       const sessionId = 'session_1';
+      const stateDir = join(cwd, '.omx', 'state');
       const sessionStateDir = join(cwd, '.omx', 'state', 'sessions', sessionId);
       const teamStatePath = join(sessionStateDir, 'team-state.json');
       const ralphStatePath = join(sessionStateDir, 'ralph-state.json');
 
       await mkdir(sessionStateDir, { recursive: true });
+      await writeJson(join(stateDir, 'session.json'), { session_id: sessionId });
       await writeJson(teamStatePath, {
         active: false,
         current_phase: 'failed',
@@ -95,11 +97,11 @@ describe('notify-hook linked team -> ralph terminal sync', () => {
       });
       await writeJson(ralphStatePath, {
         active: true,
-        current_phase: 'execution',
+        current_phase: 'executing',
         linked_team: true,
       });
 
-      runNotifyHook(cwd);
+      runNotifyHook(cwd, { session_id: sessionId });
 
       const ralphState = await readJson<Record<string, unknown>>(ralphStatePath);
       assert.equal(ralphState.active, false);
@@ -124,7 +126,7 @@ describe('notify-hook linked team -> ralph terminal sync', () => {
       });
       await writeJson(ralphStatePath, {
         active: true,
-        current_phase: 'execution',
+        current_phase: 'executing',
         linked_team: false,
       });
 
@@ -132,9 +134,49 @@ describe('notify-hook linked team -> ralph terminal sync', () => {
 
       const ralphState = await readJson<Record<string, unknown>>(ralphStatePath);
       assert.equal(ralphState.active, true);
-      assert.equal(ralphState.current_phase, 'execution');
+      assert.equal(ralphState.current_phase, 'executing');
       assert.equal(ralphState.linked_team_terminal_phase, undefined);
       assert.equal(ralphState.linked_team_terminal_at, undefined);
+    });
+  });
+
+  it('does not mutate unrelated sessions when payload session_id is provided', async () => {
+    await withTempWorkingDir(async (cwd) => {
+      const stateDir = join(cwd, '.omx', 'state');
+      const sessionA = join(stateDir, 'sessions', 'sessA');
+      const sessionB = join(stateDir, 'sessions', 'sessB');
+      await mkdir(sessionA, { recursive: true });
+      await mkdir(sessionB, { recursive: true });
+
+      await writeJson(join(sessionA, 'team-state.json'), {
+        active: false,
+        current_phase: 'complete',
+        linked_ralph: true,
+      });
+      await writeJson(join(sessionA, 'ralph-state.json'), {
+        active: true,
+        current_phase: 'executing',
+        linked_team: true,
+      });
+      await writeJson(join(sessionB, 'team-state.json'), {
+        active: false,
+        current_phase: 'failed',
+        linked_ralph: true,
+      });
+      await writeJson(join(sessionB, 'ralph-state.json'), {
+        active: true,
+        current_phase: 'executing',
+        linked_team: true,
+      });
+
+      runNotifyHook(cwd, { session_id: 'sessA' });
+
+      const ralphA = await readJson<Record<string, unknown>>(join(sessionA, 'ralph-state.json'));
+      const ralphB = await readJson<Record<string, unknown>>(join(sessionB, 'ralph-state.json'));
+      assert.equal(ralphA.active, false);
+      assert.equal(ralphA.current_phase, 'complete');
+      assert.equal(ralphB.active, true);
+      assert.equal(ralphB.current_phase, 'executing');
     });
   });
 });

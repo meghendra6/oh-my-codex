@@ -1,14 +1,14 @@
 # oh-my-codex Feature Coverage Matrix
 
 **Target: >=90% parity with oh-my-claudecode (excluding MCP tools)**
-**Last Updated:** 2026-02-13
+**Last Updated:** 2026-02-22
 
 ## Coverage Summary
 
 | Category | OMC Features | OMX Implemented | Coverage |
 |----------|-------------|-----------------|----------|
-| Agent Definitions | 30 | 30 | 100% |
-| Skills/Commands | 39 | 39 | 100% |
+| Agent Definitions | 29 | 29 | 100% |
+| Skills/Commands | 30 | 30 | 100% |
 | AGENTS.md (CLAUDE.md equiv) | 1 | 1 | 100% |
 | CLI (setup/doctor/help/etc) | 7 | 7 | 100% |
 | Config Generation | 1 | 1 | 100% |
@@ -20,7 +20,7 @@
 | Trace | 2 tools | 2 tools | 100% |
 | Verification Protocol | 1 | 1 | 100% |
 | Notification System | 3 channels | 3 channels | 100% |
-| Keyword Detection | 17 keywords | 17 keywords | 100% |
+| Keyword Detection | 16 keywords | 16 keywords | 100% |
 | Hook Pipeline | 9 events | 6 full + 3 partial | ~89% |
 | HUD/Status Line | 1 | 1 (built-in + CLI) | 100% |
 | Subagent Tracking | 1 | partial (via multi_agent) | 50% |
@@ -29,7 +29,7 @@
 
 ## Detailed Feature Mapping
 
-### Agent Definitions (30/30 = 100%)
+### Agent Definitions (29/29 = 100%)
 
 | OMC Agent | OMX Status | Mechanism |
 |-----------|-----------|-----------|
@@ -38,9 +38,9 @@
 | architect | DONE | ~/.codex/prompts/architect.md |
 | build-fixer | DONE | ~/.codex/prompts/build-fixer.md |
 | code-reviewer | DONE | ~/.codex/prompts/code-reviewer.md |
+| code-simplifier | DONE | ~/.codex/prompts/code-simplifier.md |
 | critic | DONE | ~/.codex/prompts/critic.md |
 | debugger | DONE | ~/.codex/prompts/debugger.md |
-| deep-executor | DEPRECATED | Route to ~/.codex/prompts/executor.md |
 | dependency-expert | DONE | ~/.codex/prompts/dependency-expert.md |
 | designer | DONE | ~/.codex/prompts/designer.md |
 | executor | DONE | ~/.codex/prompts/executor.md |
@@ -55,7 +55,8 @@
 | quality-reviewer | DONE | ~/.codex/prompts/quality-reviewer.md |
 | quality-strategist | DONE | ~/.codex/prompts/quality-strategist.md |
 | researcher | DONE | ~/.codex/prompts/researcher.md |
-| scientist | DONE | ~/.codex/prompts/scientist.md |
+| ~~deep-executor~~ | REMOVED (v0.5.0) | Routes to executor |
+| ~~scientist~~ | REMOVED (v0.5.0) | — |
 | security-reviewer | DONE | ~/.codex/prompts/security-reviewer.md |
 | style-reviewer | DONE | ~/.codex/prompts/style-reviewer.md |
 | test-engineer | DONE | ~/.codex/prompts/test-engineer.md |
@@ -64,7 +65,7 @@
 | vision | DONE | ~/.codex/prompts/vision.md |
 | writer | DONE | ~/.codex/prompts/writer.md |
 
-### Skills (39/39 = 100%)
+### Skills (30/30 = 100%)
 
 | OMC Skill | OMX Status | Mechanism |
 |-----------|-----------|-----------|
@@ -75,14 +76,14 @@
 | plan | DONE | ~/.agents/skills/plan/SKILL.md |
 | ralplan | DONE | ~/.agents/skills/ralplan/SKILL.md |
 | team | DONE | ~/.agents/skills/team/SKILL.md |
-| pipeline | DONE | ~/.agents/skills/pipeline/SKILL.md |
+| ~~pipeline~~ | REMOVED (v0.5.0) | — |
 | ultraqa | DONE | ~/.agents/skills/ultraqa/SKILL.md |
-| ultrapilot | DONE | ~/.agents/skills/ultrapilot/SKILL.md |
-| research | DONE | ~/.agents/skills/research/SKILL.md |
+| ~~ultrapilot~~ | REMOVED (v0.5.0) | — |
+| ~~research~~ | REMOVED (post-v0.5.0) | — |
 | code-review | DONE | ~/.agents/skills/code-review/SKILL.md |
 | security-review | DONE | ~/.agents/skills/security-review/SKILL.md |
 | tdd | DONE | ~/.agents/skills/tdd/SKILL.md |
-| deepinit | DONE | ~/.agents/skills/deepinit/SKILL.md |
+| ~~deepinit~~ | REMOVED (v0.5.0) | — |
 | deepsearch | DONE | ~/.agents/skills/deepsearch/SKILL.md |
 | analyze | DONE | ~/.agents/skills/analyze/SKILL.md |
 | build-fix | DONE | ~/.agents/skills/build-fix/SKILL.md |
@@ -90,7 +91,7 @@
 | doctor | DONE | ~/.agents/skills/doctor/SKILL.md |
 | help | DONE | ~/.agents/skills/help/SKILL.md |
 | hud | DONE | ~/.agents/skills/hud/SKILL.md |
-| learner | DONE | ~/.agents/skills/learner/SKILL.md |
+| ~~learner~~ | REMOVED (v0.5.0) | — |
 | note | DONE | ~/.agents/skills/note/SKILL.md |
 | trace | DONE | ~/.agents/skills/trace/SKILL.md |
 | skill | DONE | ~/.agents/skills/skill/SKILL.md |
@@ -98,15 +99,16 @@
 | git-master | DONE | ~/.agents/skills/git-master/SKILL.md |
 | review | DONE | ~/.agents/skills/review/SKILL.md |
 | ralph-init | DONE | ~/.agents/skills/ralph-init/SKILL.md |
-| release | DONE | ~/.agents/skills/release/SKILL.md |
+| ~~release~~ | REMOVED (v0.5.0) | — |
 | omx-setup | DONE | ~/.agents/skills/omx-setup/SKILL.md |
 | configure-telegram | DONE | ~/.agents/skills/configure-telegram/SKILL.md |
 | configure-discord | DONE | ~/.agents/skills/configure-discord/SKILL.md |
-| writer-memory | DONE | ~/.agents/skills/writer-memory/SKILL.md |
-| project-session-manager | DONE | ~/.agents/skills/project-session-manager/SKILL.md |
-| psm | DONE | ~/.agents/skills/psm/SKILL.md |
+| ~~writer-memory~~ | REMOVED (v0.5.0) | — |
+| ~~project-session-manager~~ | REMOVED (v0.5.0) | — |
+| ~~psm~~ | REMOVED (v0.5.0) | — |
 | swarm | DONE | ~/.agents/skills/swarm/SKILL.md |
-| learn-about-omx | DONE | ~/.agents/skills/learn-about-omx/SKILL.md |
+| ~~learn-about-omx~~ | REMOVED (v0.5.0) | — |
+| worker | DONE | ~/.agents/skills/worker/SKILL.md |
 
 ### Hook Pipeline (6 full + 3 partial out of 9 = ~89%)
 

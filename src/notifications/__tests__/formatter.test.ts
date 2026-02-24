@@ -7,6 +7,7 @@ import {
   formatSessionStop,
   formatAskUserQuestion,
   formatNotification,
+  parseTmuxTail,
 } from '../formatter.js';
 import type { FullNotificationPayload } from '../types.js';
 
@@ -120,5 +121,84 @@ describe('formatNotification routing', () => {
     assert.ok(formatNotification({ ...basePayload, event: 'session-end' }).includes('# Session Ended'));
     assert.ok(formatNotification({ ...basePayload, event: 'session-stop' }).includes('# Session Continuing'));
     assert.ok(formatNotification({ ...basePayload, event: 'ask-user-question' }).includes('# Input Needed'));
+  });
+});
+
+describe('parseTmuxTail', () => {
+  it('strips ANSI escape codes', () => {
+    const raw = '\x1b[32mHello\x1b[0m world';
+    assert.strictEqual(parseTmuxTail(raw), 'Hello world');
+  });
+
+  it('removes lines starting with spinner characters ●⎿✻·◼', () => {
+    const raw = [
+      '● Thinking...',
+      '⎿ Processing files',
+      '✻ Loading',
+      '· waiting',
+      '◼ stopped',
+      'Actual output line',
+    ].join('\n');
+    const result = parseTmuxTail(raw);
+    assert.ok(!result.includes('●'));
+    assert.ok(!result.includes('⎿'));
+    assert.ok(!result.includes('✻'));
+    assert.ok(!result.includes('·'));
+    assert.ok(!result.includes('◼'));
+    assert.ok(result.includes('Actual output line'));
+  });
+
+  it('removes ctrl+o to expand markers (case-insensitive)', () => {
+    const raw = 'some output\nctrl+o to expand\nmore output\nCTRL+O TO EXPAND';
+    const result = parseTmuxTail(raw);
+    assert.ok(!result.includes('ctrl+o'));
+    assert.ok(!result.includes('CTRL+O'));
+    assert.ok(result.includes('some output'));
+    assert.ok(result.includes('more output'));
+  });
+
+  it('caps output at 10 meaningful lines', () => {
+    const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`);
+    const result = parseTmuxTail(lines.join('\n'));
+    const resultLines = result.split('\n');
+    assert.strictEqual(resultLines.length, 10);
+    // Should keep the last 10 lines
+    assert.strictEqual(resultLines[0], 'line 11');
+    assert.strictEqual(resultLines[9], 'line 20');
+  });
+
+  it('returns empty string when all lines are filtered out', () => {
+    const raw = '● spinner\n⎿ spinner\nctrl+o to expand';
+    assert.strictEqual(parseTmuxTail(raw), '');
+  });
+
+  it('trims whitespace from individual lines', () => {
+    const raw = '  leading spaces  \n\t tabbed line \t';
+    const result = parseTmuxTail(raw);
+    assert.ok(result.includes('leading spaces'));
+    assert.ok(result.includes('tabbed line'));
+    assert.ok(!result.startsWith(' '));
+  });
+
+  it('handles combined ANSI codes and spinner lines', () => {
+    const raw = '\x1b[33m● Thinking...\x1b[0m\nReal output\n\x1b[32mDone\x1b[0m';
+    const result = parseTmuxTail(raw);
+    assert.ok(!result.includes('Thinking'));
+    assert.ok(result.includes('Real output'));
+    assert.ok(result.includes('Done'));
+  });
+
+  it('buildTmuxTailBlock uses parseTmuxTail output', () => {
+    const raw = '● spinner\nreal work done\nctrl+o to expand';
+    const result = formatSessionIdle({ ...basePayload, tmuxTail: raw });
+    assert.ok(result.includes('real work done'));
+    assert.ok(!result.includes('spinner'));
+    assert.ok(!result.includes('ctrl+o'));
+  });
+
+  it('buildTmuxTailBlock omits block when all lines filtered', () => {
+    const raw = '● spinner only\n⎿ more spinner';
+    const result = formatSessionIdle({ ...basePayload, tmuxTail: raw });
+    assert.ok(!result.includes('Recent output'));
   });
 });

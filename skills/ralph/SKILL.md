@@ -149,7 +149,9 @@ When the user provides the `--prd` flag, initialize a Product Requirements Docum
 Check if `{{PROMPT}}` contains `--prd` or `--PRD`.
 
 ### PRD Workflow
-1. Create `.omx/prd.json` and `.omx/progress.txt`
+1. Create canonical PRD/progress artifacts:
+   - PRD: `.omx/plans/prd-{slug}.md`
+   - Progress ledger: `.omx/state/{scope}/ralph-progress.json` (session scope when available, else root scope)
 2. Parse the task (everything after `--prd` flag)
 3. Break down into user stories:
 
@@ -171,13 +173,18 @@ Check if `{{PROMPT}}` contains `--prd` or `--PRD`.
 }
 ```
 
-4. Create `progress.txt` with timestamp and empty patterns section
+4. Initialize canonical progress ledger at `.omx/state/{scope}/ralph-progress.json`
 5. Guidelines: right-sized stories (one session each), verifiable criteria, independent stories, priority order (foundational work first)
 6. Proceed to normal ralph loop using user stories as the task list
 
 ### Example
 User input: `--prd build a todo app with React and TypeScript`
-Workflow: Detect flag, extract task, create `.omx/prd.json`, create `.omx/progress.txt`, begin ralph loop.
+Workflow: Detect flag, extract task, create `.omx/plans/prd-{slug}.md`, create `.omx/state/{scope}/ralph-progress.json`, begin ralph loop.
+
+### Legacy compatibility
+- If `.omx/prd.json` exists and canonical PRD is absent, migrate one-way into `.omx/plans/prd-{slug}.md`.
+- If `.omx/progress.txt` exists and canonical progress ledger is absent, import one-way into `.omx/state/{scope}/ralph-progress.json`.
+- Keep legacy files unchanged for one release cycle.
 
 ## Background Execution Rules
 

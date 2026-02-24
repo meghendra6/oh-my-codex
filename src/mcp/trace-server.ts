@@ -13,7 +13,7 @@ import {
 import { readFile, readdir } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
-import { getAllScopedStateDirs } from './state-paths.js';
+import { listModeStateFilesWithScopePreference } from './state-paths.js';
 
 function text(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
@@ -47,12 +47,8 @@ async function readLogFiles(logsDir: string, last?: number): Promise<TraceEntry[
     }
   }
 
-  // Sort by timestamp
   entries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-
-  if (last && last > 0) {
-    return entries.slice(-last);
-  }
+  if (last && last > 0) return entries.slice(-last);
   return entries;
 }
 
@@ -67,35 +63,37 @@ interface ModeEvent {
 
 export async function readModeEvents(workingDirectory: string): Promise<ModeEvent[]> {
   const events: ModeEvent[] = [];
-  const scopedDirs = await getAllScopedStateDirs(workingDirectory);
+  const refs = await listModeStateFilesWithScopePreference(workingDirectory);
 
-  for (const stateDir of scopedDirs) {
-    if (!existsSync(stateDir)) continue;
-    const files = await readdir(stateDir).catch(() => [] as string[]);
-    for (const f of files) {
-      if (!f.endsWith('-state.json')) continue;
-      try {
-        const data = JSON.parse(await readFile(join(stateDir, f), 'utf-8'));
-        const mode = f.replace('-state.json', '');
-
-        if (data.started_at) {
-          events.push({
-            timestamp: data.started_at,
-            event: 'mode_start',
-            mode,
-            details: { phase: data.current_phase, active: data.active },
-          });
-        }
-        if (data.completed_at) {
-          events.push({
-            timestamp: data.completed_at,
-            event: 'mode_end',
-            mode,
-            details: { phase: data.current_phase },
-          });
-        }
-      } catch { /* skip */ }
-    }
+  for (const ref of refs) {
+    try {
+      const data = JSON.parse(await readFile(ref.path, 'utf-8'));
+      if (data.started_at) {
+        events.push({
+          timestamp: data.started_at,
+          event: 'mode_start',
+          mode: ref.mode,
+          details: {
+            phase: data.current_phase,
+            active: data.active,
+            scope: ref.scope,
+            path: ref.path,
+          },
+        });
+      }
+      if (data.completed_at) {
+        events.push({
+          timestamp: data.completed_at,
+          event: 'mode_end',
+          mode: ref.mode,
+          details: {
+            phase: data.current_phase,
+            scope: ref.scope,
+            path: ref.path,
+          },
+        });
+      }
+    } catch { /* skip malformed */ }
   }
 
   return events.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
@@ -177,7 +175,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         filter !== 'turns' ? readModeEvents(wd) : Promise.resolve([]),
       ]);
 
-      // Merge and sort by timestamp
       type TimelineEntry = { timestamp: string; type: string; [key: string]: unknown };
       const timeline: TimelineEntry[] = [
         ...turns.map(t => ({
@@ -197,7 +194,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ];
 
       timeline.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-
       const result = last ? timeline.slice(-last) : timeline;
 
       return text({
@@ -215,14 +211,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         readMetrics(omxDir),
       ]);
 
-      // Turn statistics
       const turnsByType: Record<string, number> = {};
       for (const t of turns) {
         const type = t.type || 'unknown';
         turnsByType[type] = (turnsByType[type] || 0) + 1;
       }
 
-      // Mode statistics
       const modesByName: Record<string, { starts: number; ends: number }> = {};
       for (const e of modeEvents) {
         if (!modesByName[e.mode]) modesByName[e.mode] = { starts: 0, ends: 0 };
@@ -230,7 +224,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (e.event === 'mode_end') modesByName[e.mode].ends++;
       }
 
-      // Timing
       const firstTurn = turns.length > 0 ? turns[0].timestamp : null;
       const lastTurn = turns.length > 0 ? turns[turns.length - 1].timestamp : null;
       let durationMs = 0;

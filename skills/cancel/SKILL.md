@@ -43,6 +43,20 @@ Or say: "cancelomc", "stopomc"
 - Swarm is a shared SQLite/marker mode (`.omx/state/swarm.db` / `.omx/state/swarm-active.marker`) and is not session-scoped.
 - The default cleanup flow calls `state_clear` with the session id to remove only the matching session files; modes stay bound to their originating session.
 
+## Normative Ralph cancellation post-conditions (MUST)
+
+For Ralph-targeted cancellation (standalone or linked), completion is defined by post-conditions:
+
+1. Target Ralph state is terminalized, not silently removed:
+   - `active=false`
+   - `current_phase='cancelled'`
+   - `completed_at` is set (ISO timestamp)
+2. If Ralph is linked to Ultrawork or Ecomode in the same scope, that linked mode is also terminalized/non-active.
+3. If Ralph is team-linked (`linked_team=true`), Team cancellation occurs first, then Ralph terminal state is propagated.
+4. Cancellation MUST remain scope-safe: no mutation of unrelated sessions.
+
+See: `docs/contracts/ralph-cancel-contract.md`.
+
 Active modes are still cancelled in dependency order:
 1. Autopilot (includes linked ralph/ultraqa/ecomode cleanup)
 2. Ralph (cleans its linked ultrawork or ecomode)
@@ -54,6 +68,15 @@ Active modes are still cancelled in dependency order:
 8. Pipeline (standalone)
 9. Team (tmux-based)
 10. Plan Consensus (standalone)
+
+## Normative Ralph post-conditions (MUST)
+
+When cancellation targets Ralph state in a scope, completion requires all of the following:
+
+1. Ralph state is terminal in that same scope: `active=false`, `current_phase='cancelled'` (or linked terminal phase), and `completed_at` is set.
+2. Linked Ultrawork/Ecomode in the same scope is also terminal/non-active.
+3. If `linked_team=true`, Team terminalization happens before Ralph terminalization, and Ralph records linked terminal metadata.
+4. Unrelated sessions are untouched.
 
 ## Force Clear All
 

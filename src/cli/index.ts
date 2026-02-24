@@ -5,15 +5,21 @@
 
 import { execSync, execFileSync, spawn } from 'child_process';
 import { basename, dirname, join } from 'path';
-import { existsSync } from 'fs';
-import { setup } from './setup.js';
+import { existsSync, readFileSync } from 'fs';
+import { setup, SETUP_SCOPES, type SetupScope } from './setup.js';
 import { doctor } from './doctor.js';
 import { version } from './version.js';
 import { tmuxHookCommand } from './tmux-hook.js';
 import { hooksCommand } from './hooks.js';
 import { hudCommand } from '../hud/index.js';
 import { teamCommand } from './team.js';
-import { getAllScopedStateDirs, getBaseStateDir, getStateDir } from '../mcp/state-paths.js';
+import { ralphCommand } from './ralph.js';
+import {
+  getBaseStateDir,
+  getStateDir,
+  listModeStateFilesWithScopePreference,
+  resolveStateScope,
+} from '../mcp/state-paths.js';
 import { maybeCheckAndPromptUpdate } from './update.js';
 import { maybePromptGithubStar } from './star-prompt.js';
 import {
@@ -25,12 +31,34 @@ import {
 import {
   readSessionState, isSessionStale, writeSessionStart, writeSessionEnd, resetSessionMetrics,
 } from '../hooks/session.js';
+import {
+  buildClientAttachedReconcileHookName,
+  buildReconcileHudResizeArgs,
+  buildRegisterClientAttachedReconcileArgs,
+  buildRegisterResizeHookArgs,
+  buildResizeHookName,
+  buildResizeHookTarget,
+  buildScheduleDelayedHudResizeArgs,
+  buildUnregisterClientAttachedReconcileArgs,
+  buildUnregisterResizeHookArgs,
+  enableMouseScrolling,
+  isNativeWindows,
+  isWsl2,
+} from '../team/tmux-session.js';
 import { getPackageRoot } from '../utils/package.js';
 import { codexConfigPath } from '../utils/paths.js';
-import { resolveDetachedSessionSize, resolveHudPaneLines } from '../utils/tmux-layout.js';
-import { getModelForMode } from '../config/models.js';
+import { HUD_TMUX_HEIGHT_LINES } from '../hud/constants.js';
 import { buildHookEvent } from '../hooks/extensibility/events.js';
 import { dispatchHookEvent } from '../hooks/extensibility/dispatcher.js';
+import {
+  collectInheritableTeamWorkerArgs as collectInheritableTeamWorkerArgsShared,
+  resolveTeamWorkerLaunchArgs,
+} from '../team/model-contract.js';
+import {
+  parseWorktreeMode,
+  planWorktreeTarget,
+  ensureWorktree,
+} from '../team/worktree.js';
 
 const HELP = `
 oh-my-codex (omx) - Multi-agent orchestration for Codex CLI
@@ -41,6 +69,7 @@ Usage:
   omx doctor    Check installation health
   omx doctor --team  Check team/swarm runtime health diagnostics
   omx team      Spawn parallel worker panes in tmux and bootstrap inbox/task state
+  omx ralph     Launch Codex with ralph persistence mode active
   omx version   Show version information
   omx tmux-hook Manage tmux prompt injection workaround (init|status|validate|test)
   omx hooks     Manage hook plugins (init|status|validate|test)
@@ -58,16 +87,26 @@ Options:
                 (shorthand for: -c model_reasoning_effort="xhigh")
   --madmax      DANGEROUS: bypass Codex approvals and sandbox
                 (alias for --dangerously-bypass-approvals-and-sandbox)
+  --spark       Use the Codex spark model (~1.3x faster) for team workers only
+                Workers get --model gpt-5.3-codex-spark; leader model unchanged
+  --madmax-spark  spark model for workers + bypass approvals for leader and workers
+                (shorthand for: --spark --madmax)
+  -w, --worktree[=<name>]
+                Launch Codex in a git worktree (detached when no name is given)
   --force       Force reinstall (overwrite existing files)
   --dry-run     Show what would be done without doing it
   --verbose     Show detailed output
+  --scope       Setup scope for "omx setup" only:
+                user | project-local | project
 `;
 
 const MADMAX_FLAG = '--madmax';
 const CODEX_BYPASS_FLAG = '--dangerously-bypass-approvals-and-sandbox';
-const MODEL_FLAG = '--model';
 const HIGH_REASONING_FLAG = '--high';
 const XHIGH_REASONING_FLAG = '--xhigh';
+const SPARK_FLAG = '--spark';
+const MADMAX_SPARK_FLAG = '--madmax-spark';
+const SPARK_MODEL = 'gpt-5.3-codex-spark';
 const CONFIG_FLAG = '-c';
 const LONG_CONFIG_FLAG = '--config';
 const REASONING_KEY = 'model_reasoning_effort';
@@ -86,6 +125,53 @@ type CliCommand = 'launch' | 'setup' | 'doctor' | 'team' | 'version' | 'tmux-hoo
 export interface ResolvedCliInvocation {
   command: CliCommand;
   launchArgs: string[];
+}
+
+export function readPersistedSetupScope(cwd: string): SetupScope | undefined {
+  const scopePath = join(cwd, '.omx', 'setup-scope.json');
+  if (!existsSync(scopePath)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(scopePath, 'utf-8')) as Partial<{ scope: string }>;
+    if (typeof parsed.scope === 'string' && SETUP_SCOPES.includes(parsed.scope as SetupScope)) {
+      return parsed.scope as SetupScope;
+    }
+  } catch {
+    // Ignore malformed persisted scope and use defaults.
+  }
+  return undefined;
+}
+
+export function resolveCodexHomeForLaunch(cwd: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (env.CODEX_HOME && env.CODEX_HOME.trim() !== '') return env.CODEX_HOME;
+  const persistedScope = readPersistedSetupScope(cwd);
+  if (persistedScope === 'project-local') {
+    return join(cwd, '.codex');
+  }
+  return undefined;
+}
+
+export function resolveSetupScopeArg(args: string[]): SetupScope | undefined {
+  let value: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--scope') {
+      const next = args[index + 1];
+      if (!next || next.startsWith('-')) {
+        throw new Error(`Missing setup scope value after --scope. Expected one of: ${SETUP_SCOPES.join(', ')}`);
+      }
+      value = next;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--scope=')) {
+      value = arg.slice('--scope='.length);
+    }
+  }
+  if (!value) return undefined;
+  if (SETUP_SCOPES.includes(value as SetupScope)) {
+    return value as SetupScope;
+  }
+  throw new Error(`Invalid setup scope: ${value}. Expected one of: ${SETUP_SCOPES.join(', ')}`);
 }
 
 export function resolveCliInvocation(args: string[]): ResolvedCliInvocation {
@@ -112,6 +198,11 @@ interface TmuxPaneSnapshot {
   paneId: string;
   currentCommand: string;
   startCommand: string;
+}
+
+export interface DetachedSessionTmuxStep {
+  name: string;
+  args: string[];
 }
 
 export function parseTmuxPaneSnapshot(output: string): TmuxPaneSnapshot[] {
@@ -158,7 +249,7 @@ export function buildHudPaneCleanupTargets(existingPaneIds: string[], createdPan
 
 export async function main(args: string[]): Promise<void> {
   const knownCommands = new Set([
-    'launch', 'setup', 'doctor', 'team', 'version', 'tmux-hook', 'hooks', 'hud', 'status', 'cancel', 'help', '--help', '-h',
+    'launch', 'setup', 'doctor', 'team', 'ralph', 'version', 'tmux-hook', 'hooks', 'hud', 'status', 'cancel', 'help', '--help', '-h',
   ]);
   const firstArg = args[0];
   const { command, launchArgs } = resolveCliInvocation(args);
@@ -176,13 +267,21 @@ export async function main(args: string[]): Promise<void> {
         await launchWithHud(launchArgs);
         break;
       case 'setup':
-        await setup(options);
+        await setup({
+          force: options.force,
+          dryRun: options.dryRun,
+          verbose: options.verbose,
+          scope: resolveSetupScopeArg(args.slice(1)),
+        });
         break;
       case 'doctor':
         await doctor(options);
         break;
       case 'team':
         await teamCommand(args.slice(1), options);
+        break;
+      case 'ralph':
+        await ralphCommand(args.slice(1));
         break;
       case 'version':
         version();
@@ -226,18 +325,11 @@ export async function main(args: string[]): Promise<void> {
 }
 
 async function showStatus(): Promise<void> {
-  const { readdir, readFile } = await import('fs/promises');
+  const { readFile } = await import('fs/promises');
   const cwd = process.cwd();
   try {
-    const scopedDirs = await getAllScopedStateDirs(cwd);
-    const states: string[] = [];
-    for (const stateDir of scopedDirs) {
-      const files = await readdir(stateDir).catch(() => [] as string[]);
-      for (const file of files) {
-        if (!file.endsWith('-state.json') || file === 'session.json') continue;
-        states.push(join(stateDir, file));
-      }
-    }
+    const refs = await listModeStateFilesWithScopePreference(cwd);
+    const states = refs.map((ref) => ref.path);
     if (states.length === 0) {
       console.log('No active modes.');
       return;
@@ -291,9 +383,37 @@ async function reasoningCommand(args: string[]): Promise<void> {
   console.log(`Set ${REASONING_KEY}="${mode}" in ${configPath}`);
 }
 
-async function launchWithHud(args: string[]): Promise<void> {
-  const cwd = process.cwd();
-  const normalizedArgs = normalizeCodexLaunchArgs(args);
+export async function launchWithHud(args: string[]): Promise<void> {
+  // ── Win32 guard ──────────────────────────────────────────────────────
+  if (isNativeWindows()) {
+    console.error(
+      '[omx] OMX requires tmux, which is not available on native Windows.\n' +
+      '[omx] Please use one of the following supported environments:\n' +
+      '[omx]   - WSL2 (Windows Subsystem for Linux 2)\n' +
+      '[omx]   - macOS\n' +
+      '[omx]   - Linux\n' +
+      '[omx] See: https://docs.microsoft.com/en-us/windows/wsl/install',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const launchCwd = process.cwd();
+  const parsedWorktree = parseWorktreeMode(args);
+  const workerSparkModel = resolveWorkerSparkModel(parsedWorktree.remainingArgs);
+  const normalizedArgs = normalizeCodexLaunchArgs(parsedWorktree.remainingArgs);
+  let cwd = launchCwd;
+  if (parsedWorktree.mode.enabled) {
+    const planned = planWorktreeTarget({
+      cwd: launchCwd,
+      scope: 'launch',
+      mode: parsedWorktree.mode,
+    });
+    const ensured = ensureWorktree(planned);
+    if (ensured.enabled) {
+      cwd = ensured.worktreePath;
+    }
+  }
   const sessionId = `omx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   try {
@@ -318,7 +438,7 @@ async function launchWithHud(args: string[]): Promise<void> {
 
   // ── Phase 2: run ────────────────────────────────────────────────────────
   try {
-    runCodex(cwd, normalizedArgs, sessionId);
+    runCodex(cwd, normalizedArgs, sessionId, workerSparkModel);
   } finally {
     // ── Phase 3: postLaunch ─────────────────────────────────────────────
     await postLaunch(cwd, sessionId);
@@ -326,12 +446,13 @@ async function launchWithHud(args: string[]): Promise<void> {
 }
 
 export function normalizeCodexLaunchArgs(args: string[]): string[] {
+  const parsed = parseWorktreeMode(args);
   const normalized: string[] = [];
   let wantsBypass = false;
   let hasBypass = false;
   let reasoningMode: ReasoningMode | null = null;
 
-  for (const arg of args) {
+  for (const arg of parsed.remainingArgs) {
     if (arg === MADMAX_FLAG) {
       wantsBypass = true;
       continue;
@@ -356,6 +477,17 @@ export function normalizeCodexLaunchArgs(args: string[]): string[] {
       continue;
     }
 
+    if (arg === SPARK_FLAG) {
+      // Spark model is injected into worker env only (not the leader). Consume flag.
+      continue;
+    }
+
+    if (arg === MADMAX_SPARK_FLAG) {
+      // Bypass applies to leader; spark model goes to workers only. Consume flag.
+      wantsBypass = true;
+      continue;
+    }
+
     normalized.push(arg);
   }
 
@@ -368,6 +500,20 @@ export function normalizeCodexLaunchArgs(args: string[]): string[] {
   }
 
   return normalized;
+}
+
+/**
+ * Returns the spark model string if --spark or --madmax-spark appears in the
+ * raw (pre-normalize) args, or undefined if neither flag is present.
+ * Used to route the spark model to team workers without affecting the leader.
+ */
+export function resolveWorkerSparkModel(args: string[]): string | undefined {
+  for (const arg of args) {
+    if (arg === SPARK_FLAG || arg === MADMAX_SPARK_FLAG) {
+      return SPARK_MODEL;
+    }
+  }
+  return undefined;
 }
 
 function isReasoningOverride(value: string): boolean {
@@ -417,100 +563,8 @@ export function injectModelInstructionsBypassArgs(
   return [...args, CONFIG_FLAG, buildModelInstructionsOverride(cwd, env, defaultFilePath)];
 }
 
-function splitWorkerLaunchArgs(raw: string | undefined): string[] {
-  if (!raw || raw.trim() === '') return [];
-  return raw
-    .split(/\s+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-interface ParsedTeamWorkerLaunchArgs {
-  passthrough: string[];
-  wantsBypass: boolean;
-  reasoningOverride: string | null;
-  modelOverride: string | null;
-}
-
-function isValidModelValue(value: string): boolean {
-  return value.trim().length > 0 && !value.startsWith('-');
-}
-
-function parseTeamWorkerLaunchArgs(args: string[]): ParsedTeamWorkerLaunchArgs {
-  const passthrough: string[] = [];
-  let wantsBypass = false;
-  let reasoningOverride: string | null = null;
-  let modelOverride: string | null = null;
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === CODEX_BYPASS_FLAG || arg === MADMAX_FLAG) {
-      wantsBypass = true;
-      continue;
-    }
-
-    if (arg === MODEL_FLAG) {
-      const maybeValue = args[i + 1];
-      if (typeof maybeValue === 'string' && isValidModelValue(maybeValue)) {
-        modelOverride = maybeValue.trim();
-        i += 1;
-        continue;
-      }
-      passthrough.push(arg);
-      continue;
-    }
-
-    if (arg.startsWith(`${MODEL_FLAG}=`)) {
-      const inlineValue = arg.slice(`${MODEL_FLAG}=`.length).trim();
-      if (isValidModelValue(inlineValue)) {
-        modelOverride = inlineValue;
-        continue;
-      }
-      passthrough.push(arg);
-      continue;
-    }
-
-    if (arg === CONFIG_FLAG) {
-      const maybeValue = args[i + 1];
-      if (typeof maybeValue === 'string' && isReasoningOverride(maybeValue)) {
-        reasoningOverride = maybeValue;
-        i += 1;
-        continue;
-      }
-    }
-
-    passthrough.push(arg);
-  }
-
-  return {
-    passthrough,
-    wantsBypass,
-    reasoningOverride,
-    modelOverride,
-  };
-}
-
 export function collectInheritableTeamWorkerArgs(codexArgs: string[]): string[] {
-  const parsed = parseTeamWorkerLaunchArgs(codexArgs);
-
-  const inherited: string[] = [];
-  if (parsed.wantsBypass) inherited.push(CODEX_BYPASS_FLAG);
-  if (parsed.reasoningOverride) inherited.push(CONFIG_FLAG, parsed.reasoningOverride);
-  if (parsed.modelOverride) inherited.push(MODEL_FLAG, parsed.modelOverride);
-  return inherited;
-}
-
-function normalizeTeamWorkerLaunchArgs(args: string[], preferredModel?: string): string[] {
-  const parsed = parseTeamWorkerLaunchArgs(args);
-  const normalized = [...parsed.passthrough];
-
-  if (parsed.wantsBypass) normalized.push(CODEX_BYPASS_FLAG);
-  if (parsed.reasoningOverride) normalized.push(CONFIG_FLAG, parsed.reasoningOverride);
-
-  const selectedModel = preferredModel ?? parsed.modelOverride ?? undefined;
-  if (selectedModel) normalized.push(MODEL_FLAG, selectedModel);
-
-  return normalized;
+  return collectInheritableTeamWorkerArgsShared(codexArgs);
 }
 
 export function resolveTeamWorkerLaunchArgsEnv(
@@ -519,18 +573,12 @@ export function resolveTeamWorkerLaunchArgsEnv(
   inheritLeaderFlags = true,
   defaultModel?: string,
 ): string | null {
-  const envArgs = splitWorkerLaunchArgs(existingRaw);
   const inheritedArgs = inheritLeaderFlags ? collectInheritableTeamWorkerArgs(codexArgs) : [];
-  const allArgs = [...envArgs, ...inheritedArgs];
-
-  const envModel = parseTeamWorkerLaunchArgs(envArgs).modelOverride;
-  const inheritedModel = parseTeamWorkerLaunchArgs(inheritedArgs).modelOverride;
-  const fallbackModel = typeof defaultModel === 'string' && defaultModel.trim().length > 0
-    ? defaultModel.trim()
-    : undefined;
-  const selectedModel = envModel ?? inheritedModel ?? fallbackModel;
-
-  const normalized = normalizeTeamWorkerLaunchArgs(allArgs, selectedModel ?? undefined);
+  const normalized = resolveTeamWorkerLaunchArgs({
+    existingRaw,
+    inheritedArgs,
+    fallbackModel: defaultModel,
+  });
   if (normalized.length === 0) return null;
   return normalized.join(' ');
 }
@@ -634,6 +682,116 @@ export function buildTmuxSessionName(cwd: string, sessionId: string): string {
   return name.length > 120 ? name.slice(0, 120) : name;
 }
 
+function parsePaneIdFromTmuxOutput(rawOutput: string): string | null {
+  const paneId = rawOutput.split('\n')[0]?.trim() || '';
+  return paneId.startsWith('%') ? paneId : null;
+}
+
+function parseWindowIndexFromTmuxOutput(rawOutput: string): string | null {
+  const windowIndex = rawOutput.split('\n')[0]?.trim() || '';
+  return /^[0-9]+$/.test(windowIndex) ? windowIndex : null;
+}
+
+function detectDetachedSessionWindowIndex(sessionName: string): string | null {
+  try {
+    const output = execFileSync(
+      'tmux',
+      ['display-message', '-p', '-t', sessionName, '#{window_index}'],
+      { encoding: 'utf-8' },
+    );
+    return parseWindowIndexFromTmuxOutput(output);
+  } catch {
+    return null;
+  }
+}
+
+export function buildDetachedSessionBootstrapSteps(
+  sessionName: string,
+  cwd: string,
+  codexCmd: string,
+  hudCmd: string,
+  workerLaunchArgs: string | null,
+  codexHomeOverride?: string,
+): DetachedSessionTmuxStep[] {
+  const newSessionArgs: string[] = [
+    'new-session', '-d', '-s', sessionName, '-c', cwd,
+    ...(workerLaunchArgs ? ['-e', `${TEAM_WORKER_LAUNCH_ARGS_ENV}=${workerLaunchArgs}`] : []),
+    ...(codexHomeOverride ? ['-e', `CODEX_HOME=${codexHomeOverride}`] : []),
+    codexCmd,
+  ];
+  const splitCaptureArgs: string[] = [
+    'split-window', '-v', '-l', String(HUD_TMUX_HEIGHT_LINES), '-d', '-t', sessionName,
+    '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd,
+  ];
+  return [
+    { name: 'new-session', args: newSessionArgs },
+    { name: 'split-and-capture-hud-pane', args: splitCaptureArgs },
+  ];
+}
+
+export function buildDetachedSessionFinalizeSteps(
+  sessionName: string,
+  hudPaneId: string | null,
+  hookWindowIndex: string | null,
+  enableMouse: boolean,
+  wsl2: boolean,
+): DetachedSessionTmuxStep[] {
+  const steps: DetachedSessionTmuxStep[] = [];
+  if (hudPaneId && hookWindowIndex) {
+    const hookTarget = buildResizeHookTarget(sessionName, hookWindowIndex);
+    const hookName = buildResizeHookName('launch', sessionName, hookWindowIndex, hudPaneId);
+    const clientAttachedHookName = buildClientAttachedReconcileHookName('launch', sessionName, hookWindowIndex, hudPaneId);
+    steps.push({
+      name: 'register-resize-hook',
+      args: buildRegisterResizeHookArgs(hookTarget, hookName, hudPaneId),
+    });
+    steps.push({
+      name: 'register-client-attached-reconcile',
+      args: buildRegisterClientAttachedReconcileArgs(hookTarget, clientAttachedHookName, hudPaneId),
+    });
+    steps.push({
+      name: 'schedule-delayed-resize',
+      args: buildScheduleDelayedHudResizeArgs(hudPaneId),
+    });
+    steps.push({
+      name: 'reconcile-hud-resize',
+      args: buildReconcileHudResizeArgs(hudPaneId),
+    });
+  }
+
+  if (enableMouse) {
+    steps.push({ name: 'set-mouse', args: ['set-option', '-t', sessionName, 'mouse', 'on'] });
+    if (wsl2) {
+      steps.push({ name: 'set-wsl-xt', args: ['set-option', '-ga', 'terminal-overrides', ',xterm*:XT'] });
+    }
+  }
+  steps.push({ name: 'attach-session', args: ['attach-session', '-t', sessionName] });
+  return steps;
+}
+
+export function buildDetachedSessionRollbackSteps(
+  sessionName: string,
+  hookTarget: string | null,
+  hookName: string | null,
+  clientAttachedHookName: string | null,
+): DetachedSessionTmuxStep[] {
+  const steps: DetachedSessionTmuxStep[] = [];
+  if (hookTarget && clientAttachedHookName) {
+    steps.push({
+      name: 'unregister-client-attached-reconcile',
+      args: buildUnregisterClientAttachedReconcileArgs(hookTarget, clientAttachedHookName),
+    });
+  }
+  if (hookTarget && hookName) {
+    steps.push({
+      name: 'unregister-resize-hook',
+      args: buildUnregisterResizeHookArgs(hookTarget, hookName),
+    });
+  }
+  steps.push({ name: 'kill-session', args: ['kill-session', '-t', sessionName] });
+  return steps;
+}
+
 /**
  * preLaunch: Prepare environment before Codex starts.
  * 1. Orphan cleanup (stale session from a crashed launch)
@@ -701,7 +859,7 @@ async function preLaunch(cwd: string, sessionId: string): Promise<void> {
  * runCodex: Launch Codex CLI (blocks until exit).
  * All 3 paths (new tmux, existing tmux, no tmux) block via execSync/execFileSync.
  */
-function runCodex(cwd: string, args: string[], sessionId: string): void {
+function runCodex(cwd: string, args: string[], sessionId: string, workerDefaultModel?: string): void {
   const launchArgs = injectModelInstructionsBypassArgs(
     cwd,
     args,
@@ -711,16 +869,19 @@ function runCodex(cwd: string, args: string[], sessionId: string): void {
   const omxBin = process.argv[1];
   const hudCmd = buildTmuxShellCommand('node', [omxBin, 'hud', '--watch']);
   const inheritLeaderFlags = process.env[TEAM_INHERIT_LEADER_FLAGS_ENV] !== '0';
-  const configuredModel = getModelForMode('team');
   const workerLaunchArgs = resolveTeamWorkerLaunchArgsEnv(
     process.env[TEAM_WORKER_LAUNCH_ARGS_ENV],
     launchArgs,
     inheritLeaderFlags,
-    configuredModel,
+    workerDefaultModel,
   );
-  const codexEnv = workerLaunchArgs
-    ? { ...process.env, [TEAM_WORKER_LAUNCH_ARGS_ENV]: workerLaunchArgs }
+  const codexHomeOverride = resolveCodexHomeForLaunch(cwd, process.env);
+  const codexBaseEnv = codexHomeOverride
+    ? { ...process.env, CODEX_HOME: codexHomeOverride }
     : process.env;
+  const codexEnv = workerLaunchArgs
+    ? { ...codexBaseEnv, [TEAM_WORKER_LAUNCH_ARGS_ENV]: workerLaunchArgs }
+    : codexBaseEnv;
 
   if (resolveCodexLaunchPolicy(process.env) === 'inside-tmux') {
     // Already in tmux: launch codex in current pane, HUD in bottom split
@@ -734,7 +895,19 @@ function runCodex(cwd: string, args: string[], sessionId: string): void {
     try {
       hudPaneId = createHudWatchPane(cwd, hudCmd);
     } catch {
-      warnTmuxDegrade('failed to create HUD pane in current tmux session; continuing without HUD.');
+      // HUD split failed, continue without it
+    }
+
+    // Enable mouse scrolling at session start so scroll works before team
+    // expansion. Previously this was only called from createTeamSession().
+    // Opt-out: set OMX_MOUSE=0. (closes #128)
+    if (process.env.OMX_MOUSE !== '0') {
+      try {
+        const tmuxSession = execFileSync('tmux', ['display-message', '-p', '#S'], { encoding: 'utf-8' }).trim();
+        if (tmuxSession) enableMouseScrolling(tmuxSession);
+      } catch {
+        // Non-fatal: mouse scrolling is a convenience feature
+      }
     }
 
     try {
@@ -756,15 +929,77 @@ function runCodex(cwd: string, args: string[], sessionId: string): void {
     const codexCmd = buildTmuxShellCommand('codex', launchArgs);
     const tmuxSessionId = `omx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const sessionName = buildTmuxSessionName(cwd, tmuxSessionId);
-    const attached = launchOutsideTmuxSession({
-      cwd,
-      sessionName,
-      codexCmd,
-      hudCmd,
-      workerLaunchArgs,
-    });
-    if (!attached) {
-      warnTmuxDegrade('failed to launch tmux session; falling back to direct codex.');
+    let createdDetachedSession = false;
+    let registeredHookTarget: string | null = null;
+    let registeredHookName: string | null = null;
+    let registeredClientAttachedHookName: string | null = null;
+    try {
+      const bootstrapSteps = buildDetachedSessionBootstrapSteps(
+        sessionName,
+        cwd,
+        codexCmd,
+        hudCmd,
+        workerLaunchArgs,
+        codexHomeOverride,
+      );
+      for (const step of bootstrapSteps) {
+        const output = execFileSync('tmux', step.args, { stdio: step.name === 'new-session' ? 'ignore' : 'pipe', encoding: 'utf-8' });
+        if (step.name === 'new-session') {
+          createdDetachedSession = true;
+        }
+        if (step.name === 'split-and-capture-hud-pane') {
+          const hudPaneId = parsePaneIdFromTmuxOutput(output || '');
+          const hookWindowIndex = hudPaneId ? detectDetachedSessionWindowIndex(sessionName) : null;
+          const hookTarget = hudPaneId && hookWindowIndex
+            ? buildResizeHookTarget(sessionName, hookWindowIndex)
+            : null;
+          const hookName = hudPaneId && hookWindowIndex
+            ? buildResizeHookName('launch', sessionName, hookWindowIndex, hudPaneId)
+            : null;
+          const clientAttachedHookName = hudPaneId && hookWindowIndex
+            ? buildClientAttachedReconcileHookName('launch', sessionName, hookWindowIndex, hudPaneId)
+            : null;
+          const finalizeSteps = buildDetachedSessionFinalizeSteps(
+            sessionName,
+            hudPaneId,
+            hookWindowIndex,
+            process.env.OMX_MOUSE !== '0',
+            isWsl2(),
+          );
+          for (const finalizeStep of finalizeSteps) {
+            const stdio = finalizeStep.name === 'attach-session' ? 'inherit' : 'ignore';
+            try {
+              execFileSync('tmux', finalizeStep.args, { stdio });
+            } catch {
+              if (finalizeStep.name === 'attach-session') throw new Error('failed to attach detached tmux session');
+              continue;
+            }
+            if (finalizeStep.name === 'register-resize-hook' && hookTarget && hookName) {
+              registeredHookTarget = hookTarget;
+              registeredHookName = hookName;
+            }
+            if (finalizeStep.name === 'register-client-attached-reconcile' && clientAttachedHookName) {
+              registeredClientAttachedHookName = clientAttachedHookName;
+            }
+          }
+        }
+      }
+    } catch {
+      if (createdDetachedSession) {
+        const rollbackSteps = buildDetachedSessionRollbackSteps(
+          sessionName,
+          registeredHookTarget,
+          registeredHookName,
+          registeredClientAttachedHookName,
+        );
+        for (const rollbackStep of rollbackSteps) {
+          try {
+            execFileSync('tmux', rollbackStep.args, { stdio: 'ignore' });
+          } catch {
+            // best-effort rollback only
+          }
+        }
+      }
       // tmux not available or failed, just run codex directly
       try {
         execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
@@ -772,102 +1007,6 @@ function runCodex(cwd: string, args: string[], sessionId: string): void {
         // Codex exited
       }
     }
-  }
-}
-
-interface OutsideTmuxSessionLaunchOptions {
-  cwd: string;
-  sessionName: string;
-  codexCmd: string;
-  hudCmd: string;
-  workerLaunchArgs: string | null;
-}
-
-function warnTmuxDegrade(message: string): void {
-  console.error(`[omx] warning: ${message}`);
-}
-
-function parsePaneId(output: string): string | null {
-  const paneId = output.split('\n')[0]?.trim() || '';
-  return paneId.startsWith('%') ? paneId : null;
-}
-
-export function launchOutsideTmuxSession(
-  options: OutsideTmuxSessionLaunchOptions,
-  execTmux: typeof execFileSync = execFileSync,
-): boolean {
-  const { cwd, sessionName, codexCmd, hudCmd, workerLaunchArgs } = options;
-  const detachedSize = resolveDetachedSessionSize({
-    ...process.env,
-    COLUMNS: process.env.COLUMNS ?? String(process.stdout.columns ?? ''),
-    LINES: process.env.LINES ?? String(process.stdout.rows ?? ''),
-  });
-  const newSessionArgs = [
-    'new-session',
-    '-d',
-    '-s',
-    sessionName,
-    '-c',
-    cwd,
-    ...(detachedSize ? ['-x', detachedSize.cols, '-y', detachedSize.rows] : []),
-    ...(workerLaunchArgs ? ['-e', `${TEAM_WORKER_LAUNCH_ARGS_ENV}=${workerLaunchArgs}`] : []),
-    codexCmd,
-  ];
-  let leaderPaneTarget: string | null = null;
-
-  try {
-    const createdPaneOutput = execTmux('tmux', ['new-session', '-P', '-F', '#{pane_id}', ...newSessionArgs.slice(1)], { encoding: 'utf-8' });
-    if (typeof createdPaneOutput === 'string') {
-      leaderPaneTarget = parsePaneId(createdPaneOutput);
-    }
-  } catch {
-    return false;
-  }
-  if (!leaderPaneTarget) {
-    try {
-      const detectedPaneOutput = execTmux('tmux', ['display-message', '-p', '-t', sessionName, '#{pane_id}'], { encoding: 'utf-8' });
-      if (typeof detectedPaneOutput === 'string') {
-        leaderPaneTarget = parsePaneId(detectedPaneOutput);
-      }
-    } catch {
-      // Best-effort fallback below
-    }
-  }
-  if (!leaderPaneTarget) {
-    try {
-      execTmux('tmux', ['kill-session', '-t', sessionName], { stdio: 'ignore' });
-    } catch {
-      // Ignore cleanup errors
-    }
-    return false;
-  }
-
-  try {
-    execTmux(
-      'tmux',
-      ['split-window', '-v', '-l', resolveHudPaneLines(process.env), '-t', leaderPaneTarget, '-d', '-c', cwd, hudCmd],
-      { stdio: 'inherit' },
-    );
-  } catch {
-    warnTmuxDegrade('failed to create HUD pane in tmux; continuing without HUD.');
-  }
-
-  try {
-    execTmux('tmux', ['select-pane', '-t', leaderPaneTarget], { stdio: 'ignore' });
-  } catch {
-    warnTmuxDegrade('failed to focus leader pane; continuing.');
-  }
-
-  try {
-    execTmux('tmux', ['attach-session', '-t', sessionName], { stdio: 'inherit' });
-    return true;
-  } catch {
-    try {
-      execTmux('tmux', ['kill-session', '-t', sessionName], { stdio: 'ignore' });
-    } catch {
-      // Ignore cleanup errors
-    }
-    return false;
   }
 }
 
@@ -887,11 +1026,10 @@ function listHudWatchPaneIdsInCurrentWindow(currentPaneId?: string): string[] {
 function createHudWatchPane(cwd: string, hudCmd: string): string | null {
   const output = execFileSync(
     'tmux',
-    ['split-window', '-v', '-l', resolveHudPaneLines(process.env), '-d', '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd],
+    ['split-window', '-v', '-l', String(HUD_TMUX_HEIGHT_LINES), '-d', '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd],
     { encoding: 'utf-8' }
   );
-  const paneId = output.split('\n')[0]?.trim() || '';
-  return paneId.startsWith('%') ? paneId : null;
+  return parsePaneIdFromTmuxOutput(output);
 }
 
 function killTmuxPane(paneId: string): void {
@@ -1201,29 +1339,86 @@ async function flushHookDerivedWatcherOnce(cwd: string): Promise<void> {
 }
 
 async function cancelModes(): Promise<void> {
-  const { readdir, writeFile, readFile } = await import('fs/promises');
+  const { writeFile, readFile } = await import('fs/promises');
   const cwd = process.cwd();
+  const nowIso = new Date().toISOString();
   try {
-    const scopedDirs = await getAllScopedStateDirs(cwd);
-    let cancelled = 0;
-    for (const stateDir of scopedDirs) {
-      const files = await readdir(stateDir).catch(() => [] as string[]);
-      for (const file of files) {
-        if (!file.endsWith('-state.json') || file === 'session.json') continue;
-        const path = join(stateDir, file);
-        const content = await readFile(path, 'utf-8');
-        const state = JSON.parse(content);
-        if (state.active) {
-          state.active = false;
-          state.current_phase = 'cancelled';
-          state.completed_at = new Date().toISOString();
-          await writeFile(path, JSON.stringify(state, null, 2));
-          cancelled++;
-          console.log(`Cancelled: ${file.replace('-state.json', '')}`);
-        }
+    const refs = await listModeStateFilesWithScopePreference(cwd);
+    const states = new Map<string, { path: string; scope: 'root' | 'session'; state: Record<string, unknown> }>();
+
+    for (const ref of refs) {
+      const content = await readFile(ref.path, 'utf-8');
+      states.set(ref.mode, {
+        path: ref.path,
+        scope: ref.scope,
+        state: JSON.parse(content) as Record<string, unknown>,
+      });
+    }
+
+    const changed = new Set<string>();
+    const reported = new Set<string>();
+
+    const cancelMode = (mode: string, phase: string = 'cancelled', reportIfWasActive: boolean = true): void => {
+      const entry = states.get(mode);
+      if (!entry) return;
+      const wasActive = entry.state.active === true;
+      const needsChange =
+        entry.state.active !== false
+        || entry.state.current_phase !== phase
+        || typeof entry.state.completed_at !== 'string'
+        || String(entry.state.completed_at).trim() === '';
+      if (!needsChange) return;
+      entry.state.active = false;
+      entry.state.current_phase = phase;
+      entry.state.completed_at = nowIso;
+      entry.state.last_turn_at = nowIso;
+      changed.add(mode);
+      if (reportIfWasActive && wasActive) reported.add(mode);
+    };
+
+    const ralphLinksUltrawork = (state: Record<string, unknown>): boolean =>
+      state.linked_ultrawork === true || state.linked_mode === 'ultrawork';
+    const ralphLinksEcomode = (state: Record<string, unknown>): boolean =>
+      state.linked_ecomode === true || state.linked_mode === 'ecomode';
+
+    const team = states.get('team');
+    const ralph = states.get('ralph');
+    const hadActiveRalph = !!(ralph && ralph.state.active === true);
+
+    if (team && team.state.active === true && team.state.linked_ralph === true) {
+      cancelMode('team', 'cancelled', true);
+      if (ralph && ralph.state.linked_team === true) {
+        cancelMode('ralph', 'cancelled', true);
+        ralph.state.linked_team_terminal_phase = 'cancelled';
+        ralph.state.linked_team_terminal_at = nowIso;
+        changed.add('ralph');
+        if (ralphLinksUltrawork(ralph.state)) cancelMode('ultrawork', 'cancelled', true);
+        if (ralphLinksEcomode(ralph.state)) cancelMode('ecomode', 'cancelled', true);
       }
     }
-    if (cancelled === 0) {
+
+    if (ralph && ralph.state.active === true) {
+      cancelMode('ralph', 'cancelled', true);
+      if (ralphLinksUltrawork(ralph.state)) cancelMode('ultrawork', 'cancelled', true);
+      if (ralphLinksEcomode(ralph.state)) cancelMode('ecomode', 'cancelled', true);
+    }
+
+    if (!hadActiveRalph) {
+      for (const [mode, entry] of states.entries()) {
+        if (entry.state.active === true) cancelMode(mode, 'cancelled', true);
+      }
+    }
+
+    for (const [mode, entry] of states.entries()) {
+      if (!changed.has(mode)) continue;
+      await writeFile(entry.path, JSON.stringify(entry.state, null, 2));
+    }
+
+    for (const mode of reported) {
+      console.log(`Cancelled: ${mode}`);
+    }
+
+    if (reported.size === 0) {
       console.log('No active modes to cancel.');
     }
   } catch {

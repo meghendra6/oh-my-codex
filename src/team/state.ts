@@ -1,8 +1,10 @@
 import { appendFile, readFile, writeFile, mkdir, rm, rename, readdir, stat } from 'fs/promises';
-import { join, dirname } from 'path';
+import { join, dirname, resolve, sep } from 'path';
 import { existsSync } from 'fs';
 import { randomUUID } from 'crypto';
+import { performance } from 'perf_hooks';
 import { omxStateDir } from '../utils/paths.js';
+import { type TeamPhase, type TerminalPhase } from './orchestrator.js';
 
 export interface TeamConfig {
   name: string;
@@ -14,19 +16,32 @@ export interface TeamConfig {
   created_at: string;
   tmux_session: string; // "omx-team-{name}"
   next_task_id: number;
+  leader_cwd?: string;
+  team_state_root?: string;
+  workspace_mode?: 'single' | 'worktree';
   /** Leader's own tmux pane ID — must never be killed during worker cleanup. */
-  leader_pane_id?: string;
+  leader_pane_id: string | null;
   /** HUD pane spawned below the leader column — excluded from worker pane cleanup. */
-  hud_pane_id?: string;
+  hud_pane_id: string | null;
+  /** Registered HUD resize hook name used for window-size reconciliation. */
+  resize_hook_name: string | null;
+  /** Registered HUD resize hook target in "<session>:<window>" form. */
+  resize_hook_target: string | null;
 }
 
 export interface WorkerInfo {
   name: string; // "worker-1"
   index: number; // tmux window index (1-based)
   role: string; // agent type
+  worker_cli?: 'codex' | 'claude';
   assigned_tasks: string[]; // task IDs
   pid?: number;
   pane_id?: string;
+  working_dir?: string;
+  worktree_path?: string;
+  worktree_branch?: string;
+  worktree_detached?: boolean;
+  team_state_root?: string;
 }
 
 export interface WorkerHeartbeat {
@@ -104,6 +119,19 @@ export interface TeamManifestV2 {
   workers: WorkerInfo[];
   next_task_id: number;
   created_at: string;
+  leader_cwd?: string;
+  team_state_root?: string;
+  workspace_mode?: 'single' | 'worktree';
+  leader_pane_id: string | null;
+  hud_pane_id: string | null;
+  resize_hook_name: string | null;
+  resize_hook_target: string | null;
+}
+
+export interface TeamWorkspaceMetadata {
+  leader_cwd?: string;
+  team_state_root?: string;
+  workspace_mode?: 'single' | 'worktree';
 }
 
 export interface TeamEvent {
@@ -111,6 +139,7 @@ export interface TeamEvent {
   team: string;
   type:
     | 'task_completed'
+    | 'task_failed'
     | 'worker_idle'
     | 'worker_stopped'
     | 'message_received'
@@ -159,15 +188,15 @@ export type TaskReadiness =
 
 export type ClaimTaskResult =
   | { ok: true; task: TeamTaskV2; claimToken: string }
-  | { ok: false; error: 'claim_conflict' | 'blocked_dependency' | 'task_not_found'; dependencies?: string[] };
+  | { ok: false; error: 'claim_conflict' | 'blocked_dependency' | 'task_not_found' | 'already_terminal' | 'worker_not_found'; dependencies?: string[] };
 
 export type TransitionTaskResult =
   | { ok: true; task: TeamTaskV2 }
-  | { ok: false; error: 'claim_conflict' | 'invalid_transition' | 'task_not_found' };
+  | { ok: false; error: 'claim_conflict' | 'invalid_transition' | 'task_not_found' | 'already_terminal' | 'lease_expired' };
 
 export type ReleaseTaskClaimResult =
   | { ok: true; task: TeamTaskV2 }
-  | { ok: false; error: 'claim_conflict' | 'task_not_found' };
+  | { ok: false; error: 'claim_conflict' | 'task_not_found' | 'already_terminal' };
 
 export interface TeamSummary {
   teamName: string;
@@ -182,12 +211,66 @@ export interface TeamSummary {
   };
   workers: Array<{ name: string; alive: boolean; lastTurnAt: string | null; turnsWithoutProgress: number }>;
   nonReportingWorkers: string[];
+  performance?: TeamSummaryPerformance;
+}
+
+export interface TeamSummaryPerformance {
+  total_ms: number;
+  tasks_loaded_ms: number;
+  workers_polled_ms: number;
+  task_count: number;
+  worker_count: number;
 }
 
 export const DEFAULT_MAX_WORKERS = 20;
 export const ABSOLUTE_MAX_WORKERS = 20;
 const DEFAULT_CLAIM_LEASE_MS = 15 * 60 * 1000;
 const LOCK_STALE_MS = 5 * 60 * 1000;
+
+const WORKER_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const TASK_ID_PATTERN = /^\d{1,20}$/;
+type TeamTaskStatus = TeamTask['status'];
+
+const TERMINAL_TASK_STATUSES: ReadonlySet<TeamTaskStatus> = new Set(['completed', 'failed']);
+const TASK_STATUS_TRANSITIONS: Readonly<Record<TeamTaskStatus, readonly TeamTaskStatus[]>> = {
+  pending: [],
+  blocked: [],
+  in_progress: ['completed', 'failed'],
+  completed: [],
+  failed: [],
+};
+
+function isTerminalTaskStatus(status: TeamTaskStatus): boolean {
+  return TERMINAL_TASK_STATUSES.has(status);
+}
+
+function canTransitionTaskStatus(from: TeamTaskStatus, to: TeamTaskStatus): boolean {
+  return TASK_STATUS_TRANSITIONS[from]?.includes(to) ?? false;
+}
+
+function assertPathWithinDir(filePath: string, rootDir: string): void {
+  const normalizedRoot = resolve(rootDir);
+  const normalizedPath = resolve(filePath);
+  if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(normalizedRoot + sep)) {
+    throw new Error('Path traversal detected: path is outside the allowed directory');
+  }
+}
+
+function validateWorkerName(name: string): void {
+  if (!WORKER_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid worker name: "${name}". Must match /^[a-z0-9][a-z0-9-]{0,63}$/ (lowercase alphanumeric + hyphens, max 64 chars).`
+    );
+  }
+}
+
+function validateTaskId(taskId: string): void {
+  if (!TASK_ID_PATTERN.test(taskId)) {
+    throw new Error(
+      `Invalid task ID: "${taskId}". Must be a positive integer (digits only, max 20 digits).`
+    );
+  }
+}
 
 async function writeTaskClaimLockOwnerToken(ownerPath: string, ownerToken: string): Promise<void> {
   await writeFile(ownerPath, ownerToken, 'utf8');
@@ -291,8 +374,20 @@ function normalizeTask(task: TeamTask): TeamTaskV2 {
 }
 
 // Team state directory: .omx/state/team/{teamName}/
+function resolveTeamStateRoot(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = env.OMX_TEAM_STATE_ROOT;
+  if (typeof explicit === 'string' && explicit.trim() !== '') {
+    return resolve(cwd, explicit.trim());
+  }
+  return omxStateDir(cwd);
+}
+
 function teamDir(teamName: string, cwd: string): string {
-  return join(omxStateDir(cwd), 'team', teamName);
+  return join(resolveTeamStateRoot(cwd), 'team', teamName);
+}
+
+function workerDir(teamName: string, workerName: string, cwd: string): string {
+  return join(teamDir(teamName, cwd), 'workers', workerName);
 }
 
 function teamConfigPath(teamName: string, cwd: string): string {
@@ -304,7 +399,10 @@ function teamManifestV2Path(teamName: string, cwd: string): string {
 }
 
 function taskClaimLockDir(teamName: string, taskId: string, cwd: string): string {
-  return join(teamDir(teamName, cwd), 'claims', `task-${taskId}.lock`);
+  validateTaskId(taskId);
+  const p = join(teamDir(teamName, cwd), 'claims', `task-${taskId}.lock`);
+  assertPathWithinDir(p, omxStateDir(cwd));
+  return p;
 }
 
 function eventLogPath(teamName: string, cwd: string): string {
@@ -312,15 +410,24 @@ function eventLogPath(teamName: string, cwd: string): string {
 }
 
 function mailboxPath(teamName: string, workerName: string, cwd: string): string {
-  return join(teamDir(teamName, cwd), 'mailbox', `${workerName}.json`);
+  validateWorkerName(workerName);
+  const p = join(teamDir(teamName, cwd), 'mailbox', `${workerName}.json`);
+  assertPathWithinDir(p, omxStateDir(cwd));
+  return p;
 }
 
 function mailboxLockDir(teamName: string, workerName: string, cwd: string): string {
-  return join(teamDir(teamName, cwd), 'mailbox', `.lock-${workerName}`);
+  validateWorkerName(workerName);
+  const p = join(teamDir(teamName, cwd), 'mailbox', `.lock-${workerName}`);
+  assertPathWithinDir(p, omxStateDir(cwd));
+  return p;
 }
 
 function approvalPath(teamName: string, taskId: string, cwd: string): string {
-  return join(teamDir(teamName, cwd), 'approvals', `task-${taskId}.json`);
+  validateTaskId(taskId);
+  const p = join(teamDir(teamName, cwd), 'approvals', `task-${taskId}.json`);
+  assertPathWithinDir(p, omxStateDir(cwd));
+  return p;
 }
 
 function summarySnapshotPath(teamName: string, cwd: string): string {
@@ -380,6 +487,10 @@ function isTeamManifestV2(value: unknown): value is TeamManifestV2 {
   if (typeof v.next_task_id !== 'number') return false;
   if (typeof v.created_at !== 'string') return false;
   if (!Array.isArray(v.workers)) return false;
+  if (!(typeof v.leader_pane_id === 'string' || v.leader_pane_id === null)) return false;
+  if (!(typeof v.hud_pane_id === 'string' || v.hud_pane_id === null)) return false;
+  if (!(typeof v.resize_hook_name === 'string' || v.resize_hook_name === null)) return false;
+  if (!(typeof v.resize_hook_target === 'string' || v.resize_hook_target === null)) return false;
   if (!v.leader || typeof v.leader !== 'object') return false;
   if (!v.policy || typeof v.policy !== 'object') return false;
   if (!v.permissions_snapshot || typeof v.permissions_snapshot !== 'object') return false;
@@ -416,6 +527,7 @@ export async function initTeamState(
   cwd: string,
   maxWorkers: number = DEFAULT_MAX_WORKERS,
   env: NodeJS.ProcessEnv = process.env,
+  workspace: TeamWorkspaceMetadata = {},
 ): Promise<TeamConfig> {
   validateTeamName(teamName);
 
@@ -465,9 +577,27 @@ export async function initTeamState(
     created_at: new Date().toISOString(),
     tmux_session: `omx-team-${teamName}`,
     next_task_id: 1,
+    leader_cwd: workspace.leader_cwd,
+    team_state_root: workspace.team_state_root,
+    workspace_mode: workspace.workspace_mode,
+    leader_pane_id: null,
+    hud_pane_id: null,
+    resize_hook_name: null,
+    resize_hook_target: null,
   };
 
   await writeAtomic(join(root, 'config.json'), JSON.stringify(config, null, 2));
+  await writeTeamPhase(
+    teamName,
+    {
+      current_phase: 'team-exec',
+      max_fix_attempts: 3,
+      current_fix_attempt: 0,
+      transitions: [],
+      updated_at: new Date().toISOString(),
+    },
+    cwd
+  );
   await writeTeamManifestV2(
     {
       schema_version: 2,
@@ -485,6 +615,13 @@ export async function initTeamState(
       workers,
       next_task_id: 1,
       created_at: config.created_at,
+      leader_cwd: workspace.leader_cwd,
+      team_state_root: workspace.team_state_root,
+      workspace_mode: workspace.workspace_mode,
+      leader_pane_id: null,
+      hud_pane_id: null,
+      resize_hook_name: null,
+      resize_hook_target: null,
     },
     cwd
   );
@@ -492,19 +629,27 @@ export async function initTeamState(
 }
 
 async function writeConfig(cfg: TeamConfig, cwd: string): Promise<void> {
-  const p = teamConfigPath(cfg.name, cwd);
-  await writeAtomic(p, JSON.stringify(cfg, null, 2));
+  const normalized = normalizeTeamConfig(cfg);
+  const p = teamConfigPath(normalized.name, cwd);
+  await writeAtomic(p, JSON.stringify(normalized, null, 2));
 
   // Keep v2 manifest in sync when present. Don't create it implicitly here to preserve migration behavior.
-  const existing = await readTeamManifestV2(cfg.name, cwd);
+  const existing = await readTeamManifestV2(normalized.name, cwd);
   if (existing) {
     const merged: TeamManifestV2 = {
       ...existing,
-      task: cfg.task,
-      tmux_session: cfg.tmux_session,
-      worker_count: cfg.worker_count,
-      workers: cfg.workers,
-      next_task_id: normalizeNextTaskId(cfg.next_task_id),
+      task: normalized.task,
+      tmux_session: normalized.tmux_session,
+      worker_count: normalized.worker_count,
+      workers: normalized.workers,
+      next_task_id: normalizeNextTaskId(normalized.next_task_id),
+      leader_cwd: normalized.leader_cwd,
+      team_state_root: normalized.team_state_root,
+      workspace_mode: normalized.workspace_mode,
+      leader_pane_id: normalized.leader_pane_id,
+      hud_pane_id: normalized.hud_pane_id,
+      resize_hook_name: normalized.resize_hook_name,
+      resize_hook_target: normalized.resize_hook_target,
     };
     await writeTeamManifestV2(merged, cwd);
   }
@@ -521,22 +666,47 @@ function teamConfigFromManifest(manifest: TeamManifestV2): TeamConfig {
     created_at: manifest.created_at,
     tmux_session: manifest.tmux_session,
     next_task_id: manifest.next_task_id,
+    leader_cwd: manifest.leader_cwd,
+    team_state_root: manifest.team_state_root,
+    workspace_mode: manifest.workspace_mode,
+    leader_pane_id: manifest.leader_pane_id,
+    hud_pane_id: manifest.hud_pane_id,
+    resize_hook_name: manifest.resize_hook_name,
+    resize_hook_target: manifest.resize_hook_target,
+  };
+}
+
+function normalizeTeamConfig(config: TeamConfig): TeamConfig {
+  return {
+    ...config,
+    leader_pane_id: config.leader_pane_id ?? null,
+    hud_pane_id: config.hud_pane_id ?? null,
+    resize_hook_name: config.resize_hook_name ?? null,
+    resize_hook_target: config.resize_hook_target ?? null,
   };
 }
 
 function teamManifestFromConfig(config: TeamConfig): TeamManifestV2 {
+  const normalized = normalizeTeamConfig(config);
   return {
     schema_version: 2,
-    name: config.name,
-    task: config.task,
+    name: normalized.name,
+    task: normalized.task,
     leader: defaultLeader(),
     policy: defaultPolicy(),
     permissions_snapshot: defaultPermissionsSnapshot(),
-    tmux_session: config.tmux_session,
-    worker_count: config.worker_count,
-    workers: config.workers,
-    next_task_id: normalizeNextTaskId(config.next_task_id),
-    created_at: config.created_at,
+    tmux_session: normalized.tmux_session,
+    worker_count: normalized.worker_count,
+    workers: normalized.workers,
+    next_task_id: normalizeNextTaskId(normalized.next_task_id),
+    created_at: normalized.created_at,
+    leader_cwd: normalized.leader_cwd,
+    team_state_root: normalized.team_state_root,
+    workspace_mode: normalized.workspace_mode,
+    leader_pane_id: normalized.leader_pane_id,
+    hud_pane_id: normalized.hud_pane_id,
+    resize_hook_name: normalized.resize_hook_name,
+    resize_hook_target: normalized.resize_hook_target,
   };
 }
 
@@ -626,7 +796,7 @@ export async function readTeamConfig(teamName: string, cwd: string): Promise<Tea
     const raw = await readFile(p, 'utf8');
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object') return null;
-    return parsed as TeamConfig;
+    return normalizeTeamConfig(parsed as TeamConfig);
   } catch {
     return null;
   }
@@ -639,7 +809,7 @@ export async function writeWorkerIdentity(
   identity: WorkerInfo,
   cwd: string
 ): Promise<void> {
-  const p = join(teamDir(teamName, cwd), 'workers', workerName, 'identity.json');
+  const p = join(workerDir(teamName, workerName, cwd), 'identity.json');
   await writeAtomic(p, JSON.stringify(identity, null, 2));
 }
 
@@ -650,7 +820,7 @@ export async function readWorkerHeartbeat(
   cwd: string
 ): Promise<WorkerHeartbeat | null> {
   try {
-    const p = join(teamDir(teamName, cwd), 'workers', workerName, 'heartbeat.json');
+    const p = join(workerDir(teamName, workerName, cwd), 'heartbeat.json');
     if (!existsSync(p)) return null;
     const raw = await readFile(p, 'utf8');
     const parsed = JSON.parse(raw) as unknown;
@@ -667,14 +837,14 @@ export async function updateWorkerHeartbeat(
   heartbeat: WorkerHeartbeat,
   cwd: string
 ): Promise<void> {
-  const p = join(teamDir(teamName, cwd), 'workers', workerName, 'heartbeat.json');
+  const p = join(workerDir(teamName, workerName, cwd), 'heartbeat.json');
   await writeAtomic(p, JSON.stringify(heartbeat, null, 2));
 }
 
 // Read worker status (returns {state:'unknown'} on missing/malformed)
 export async function readWorkerStatus(teamName: string, workerName: string, cwd: string): Promise<WorkerStatus> {
   try {
-    const p = join(teamDir(teamName, cwd), 'workers', workerName, 'status.json');
+    const p = join(workerDir(teamName, workerName, cwd), 'status.json');
     if (!existsSync(p)) {
       return { state: 'unknown', updated_at: new Date().toISOString() };
     }
@@ -696,12 +866,15 @@ export async function writeWorkerInbox(
   prompt: string,
   cwd: string
 ): Promise<void> {
-  const p = join(teamDir(teamName, cwd), 'workers', workerName, 'inbox.md');
+  const p = join(workerDir(teamName, workerName, cwd), 'inbox.md');
   await writeAtomic(p, prompt);
 }
 
 function taskFilePath(teamName: string, taskId: string, cwd: string): string {
-  return join(teamDir(teamName, cwd), 'tasks', `task-${taskId}.json`);
+  validateTaskId(taskId);
+  const p = join(teamDir(teamName, cwd), 'tasks', `task-${taskId}.json`);
+  assertPathWithinDir(p, omxStateDir(cwd));
+  return p;
 }
 
 async function withTeamLock<T>(teamName: string, cwd: string, fn: () => Promise<T>): Promise<T> {
@@ -925,16 +1098,19 @@ export async function updateTask(
     const existing = await readTask(teamName, taskId, cwd);
     if (!existing) return null;
 
-    if (updates.status && !['pending', 'blocked', 'in_progress', 'completed', 'failed'].includes(updates.status)) {
+    if (updates.status !== undefined && !['pending', 'blocked', 'in_progress', 'completed', 'failed'].includes(updates.status)) {
       throw new Error(`Invalid task status: ${updates.status}`);
     }
+
+    const rawDeps = updates.depends_on ?? updates.blocked_by ?? existing.depends_on ?? existing.blocked_by ?? [];
+    const normalizedDeps = Array.isArray(rawDeps) ? rawDeps : [];
 
     const merged: TeamTaskV2 = {
       ...normalizeTask(existing),
       ...updates,
       id: existing.id,
       created_at: existing.created_at,
-      depends_on: updates.depends_on ?? updates.blocked_by ?? existing.depends_on ?? existing.blocked_by ?? [],
+      depends_on: normalizedDeps,
       version: Math.max(1, existing.version ?? 1) + 1,
     };
 
@@ -952,14 +1128,33 @@ export async function listTasks(teamName: string, cwd: string): Promise<TeamTask
   const tasksRoot = join(teamDir(teamName, cwd), 'tasks');
   if (!existsSync(tasksRoot)) return [];
 
-  const files = await readdir(tasksRoot);
-  const tasks: TeamTaskV2[] = [];
+  const files = await readdir(tasksRoot, { withFileTypes: true });
+  const matched = files.flatMap((entry) => {
+    if (!entry.isFile()) return [];
+    const m = /^task-(\d+)\.json$/.exec(entry.name);
+    if (!m) return [];
+    return [{ id: m[1], fileName: entry.name }];
+  });
 
-  for (const f of files) {
-    const m = /^task-(\d+)\.json$/.exec(f);
-    if (!m) continue;
-    const t = await readTask(teamName, m[1], cwd);
-    if (t) tasks.push(normalizeTask(t));
+  const results = await Promise.all(
+    matched.map(async ({ id, fileName }) => {
+      try {
+        const raw = await readFile(join(tasksRoot, fileName), 'utf8');
+        const parsed = JSON.parse(raw) as unknown;
+        if (!isTeamTask(parsed)) return null;
+        const normalized = normalizeTask(parsed);
+        // Ignore corrupt task files whose internal id mismatches filename.
+        if (normalized.id !== id) return null;
+        return normalized;
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const tasks: TeamTaskV2[] = [];
+  for (const task of results) {
+    if (task) tasks.push(task);
   }
 
   tasks.sort((a, b) => Number(a.id) - Number(b.id));
@@ -990,6 +1185,16 @@ export async function claimTask(
   expectedVersion: number | null,
   cwd: string
 ): Promise<ClaimTaskResult> {
+  // Validate that the claiming worker is registered in the team.
+  // Without this check, ghost worker IDs (non-existent workers) could claim
+  // tasks, breaking team state integrity and routing assumptions.
+  const cfg = await readTeamConfig(teamName, cwd);
+  if (!cfg || !cfg.workers.some((w) => w.name === workerName)) {
+    return { ok: false, error: 'worker_not_found' };
+  }
+
+  const existing = await readTask(teamName, taskId, cwd);
+  if (!existing) return { ok: false, error: 'task_not_found' };
   const readiness = await computeTaskReadiness(teamName, taskId, cwd);
   if (!readiness.ready) {
     return { ok: false, error: 'blocked_dependency', dependencies: readiness.dependencies };
@@ -1001,6 +1206,28 @@ export async function claimTask(
     const v = normalizeTask(current);
     if (expectedVersion !== null && v.version !== expectedVersion) {
       return { ok: false as const, error: 'claim_conflict' as const };
+    }
+    const readinessAfterLock = await computeTaskReadiness(teamName, taskId, cwd);
+    if (!readinessAfterLock.ready) {
+      return {
+        ok: false as const,
+        error: 'blocked_dependency' as const,
+        dependencies: readinessAfterLock.dependencies,
+      };
+    }
+    if (isTerminalTaskStatus(v.status)) {
+      return { ok: false as const, error: 'already_terminal' as const };
+    }
+    if (v.status === 'in_progress') {
+      return { ok: false as const, error: 'claim_conflict' as const };
+    }
+    if (v.status === 'pending' || v.status === 'blocked') {
+      if (v.claim) {
+        return { ok: false as const, error: 'claim_conflict' as const };
+      }
+      if (v.owner && v.owner !== workerName) {
+        return { ok: false as const, error: 'claim_conflict' as const };
+      }
     }
 
     const claimToken = randomUUID();
@@ -1029,24 +1256,38 @@ export async function transitionTaskStatus(
   claimToken: string,
   cwd: string
 ): Promise<TransitionTaskResult> {
-  let emittedEvent: TeamEvent | null = null;
+  if (!canTransitionTaskStatus(from, to)) {
+    return { ok: false, error: 'invalid_transition' };
+  }
+
   const lock = await withTaskClaimLock(teamName, taskId, cwd, async () => {
     const current = await readTask(teamName, taskId, cwd);
     if (!current) return { ok: false as const, error: 'task_not_found' as const };
     const v = normalizeTask(current);
 
+    if (isTerminalTaskStatus(v.status)) {
+      return { ok: false as const, error: 'already_terminal' as const };
+    }
+    if (!canTransitionTaskStatus(v.status, to)) {
+      return { ok: false as const, error: 'invalid_transition' as const };
+    }
     if (v.status !== from) return { ok: false as const, error: 'invalid_transition' as const };
-    if (!v.claim || v.claim.token !== claimToken) return { ok: false as const, error: 'claim_conflict' as const };
+    if (!v.owner || !v.claim || v.claim.owner !== v.owner || v.claim.token !== claimToken) {
+      return { ok: false as const, error: 'claim_conflict' as const };
+    }
+    if (new Date(v.claim.leased_until) <= new Date()) return { ok: false as const, error: 'lease_expired' as const };
 
+    const completedAt = new Date().toISOString();
     const updated: TeamTaskV2 = {
       ...v,
       status: to,
-      completed_at: to === 'completed' || to === 'failed' ? new Date().toISOString() : v.completed_at,
+      completed_at: completedAt,
+      claim: undefined,
       version: v.version + 1,
     };
     await writeAtomic(taskFilePath(teamName, taskId, cwd), JSON.stringify(updated, null, 2));
     if (to === 'completed') {
-      emittedEvent = await appendTeamEvent(
+      await appendTeamEvent(
         teamName,
         {
           type: 'task_completed',
@@ -1058,10 +1299,10 @@ export async function transitionTaskStatus(
         cwd
       );
     } else if (to === 'failed') {
-      emittedEvent = await appendTeamEvent(
+      await appendTeamEvent(
         teamName,
         {
-          type: 'worker_stopped',
+          type: 'task_failed',
           worker: updated.owner || 'unknown',
           task_id: updated.id,
           message_id: null,
@@ -1074,7 +1315,24 @@ export async function transitionTaskStatus(
   });
 
   if (!lock.ok) return { ok: false, error: 'claim_conflict' };
-  void emittedEvent;
+  // If a task_completed event was emitted via this claim-safe path, record the task ID in
+  // the monitor snapshot so that emitMonitorDerivedEvents does not emit a duplicate event
+  // on the next monitorTeam poll (issue #161).
+  if (to === 'completed') {
+    const existingSnap = await readMonitorSnapshot(teamName, cwd);
+    const updatedSnap: TeamMonitorSnapshotState = existingSnap
+      ? { ...existingSnap, completedEventTaskIds: { ...(existingSnap.completedEventTaskIds ?? {}), [taskId]: true } }
+      : {
+          taskStatusById: {},
+          workerAliveByName: {},
+          workerStateByName: {},
+          workerTurnCountByName: {},
+          workerTaskIdByName: {},
+          mailboxNotifiedByMessageId: {},
+          completedEventTaskIds: { [taskId]: true },
+        };
+    await writeMonitorSnapshot(teamName, updatedSnap, cwd);
+  }
   return lock.value;
 }
 
@@ -1093,7 +1351,12 @@ export async function releaseTaskClaim(
       return { ok: true as const, task: v };
     }
 
-    const tokenMatches = Boolean(v.claim && v.claim.token === claimToken);
+    if (v.status === 'completed' || v.status === 'failed') {
+      return { ok: false as const, error: 'already_terminal' as const };
+    }
+
+    const leaseActive = Boolean(v.claim && new Date(v.claim.leased_until) > new Date());
+    const tokenMatches = Boolean(v.claim && v.claim.token === claimToken && leaseActive);
     const ownerMatches = v.status === 'in_progress' && v.owner === workerName;
     if (!tokenMatches && !ownerMatches) {
       return { ok: false as const, error: 'claim_conflict' as const };
@@ -1275,10 +1538,14 @@ export async function readTaskApproval(
 
 // Get team summary with aggregation and non-reporting worker detection
 export async function getTeamSummary(teamName: string, cwd: string): Promise<TeamSummary | null> {
+  const summaryStartMs = performance.now();
   const cfg = await readTeamConfig(teamName, cwd);
   if (!cfg) return null;
 
+  const tasksStartMs = performance.now();
   const tasks = await listTasks(teamName, cwd);
+  const tasksLoadedMs = performance.now() - tasksStartMs;
+  const taskById = new Map(tasks.map((task) => [task.id, task] as const));
   const previousSnapshot = await readSummarySnapshot(teamName, cwd);
   const counts = {
     total: tasks.length,
@@ -1305,9 +1572,19 @@ export async function getTeamSummary(teamName: string, cwd: string): Promise<Tea
     workerTaskByName: {},
   };
 
-  for (const w of workers) {
-    const hb = await readWorkerHeartbeat(teamName, w.name, cwd);
-    const status = await readWorkerStatus(teamName, w.name, cwd);
+  const workerPollStartMs = performance.now();
+  const workerSignals = await Promise.all(
+    workers.map(async (worker) => {
+      const [hb, status] = await Promise.all([
+        readWorkerHeartbeat(teamName, worker.name, cwd),
+        readWorkerStatus(teamName, worker.name, cwd),
+      ]);
+      return { worker, hb, status };
+    })
+  );
+  const workersPolledMs = performance.now() - workerPollStartMs;
+
+  for (const { worker: w, hb, status } of workerSignals) {
 
     const alive = hb?.alive ?? false;
     const lastTurnAt = hb?.last_turn_at ?? null;
@@ -1315,7 +1592,7 @@ export async function getTeamSummary(teamName: string, cwd: string): Promise<Tea
     const currentTaskId = status.current_task_id ?? '';
     const prevTaskId = previousSnapshot?.workerTaskByName[w.name] ?? '';
     const prevTurnCount = previousSnapshot?.workerTurnCountByName[w.name] ?? 0;
-    const currentTask = currentTaskId ? await readTask(teamName, currentTaskId, cwd) : null;
+    const currentTask = currentTaskId ? taskById.get(currentTaskId) ?? null : null;
 
     const turnsWithoutProgress =
       hb &&
@@ -1343,6 +1620,13 @@ export async function getTeamSummary(teamName: string, cwd: string): Promise<Tea
     tasks: counts,
     workers: workerSummaries,
     nonReportingWorkers,
+    performance: {
+      total_ms: Number((performance.now() - summaryStartMs).toFixed(2)),
+      tasks_loaded_ms: Number(tasksLoadedMs.toFixed(2)),
+      workers_polled_ms: Number(workersPolledMs.toFixed(2)),
+      task_count: tasks.length,
+      worker_count: workers.length,
+    },
   };
 }
 
@@ -1380,7 +1664,7 @@ export async function writeShutdownRequest(
   requestedBy: string,
   cwd: string,
 ): Promise<void> {
-  const p = join(teamDir(teamName, cwd), 'workers', workerName, 'shutdown-request.json');
+  const p = join(workerDir(teamName, workerName, cwd), 'shutdown-request.json');
   await writeAtomic(p, JSON.stringify({ requested_at: new Date().toISOString(), requested_by: requestedBy }, null, 2));
 }
 
@@ -1390,7 +1674,7 @@ export async function readShutdownAck(
   cwd: string,
   minUpdatedAt?: string,
 ): Promise<ShutdownAck | null> {
-  const ackPath = join(teamDir(teamName, cwd), 'workers', workerName, 'shutdown-ack.json');
+  const ackPath = join(workerDir(teamName, workerName, cwd), 'shutdown-ack.json');
   if (!existsSync(ackPath)) return null;
   try {
     const raw = await readFile(ackPath, 'utf-8');
@@ -1416,6 +1700,28 @@ export interface TeamMonitorSnapshotState {
   workerTurnCountByName: Record<string, number>;
   workerTaskIdByName: Record<string, string>;
   mailboxNotifiedByMessageId: Record<string, string>;
+  /** Task IDs for which a task_completed event has already been emitted (from any path). */
+  completedEventTaskIds: Record<string, boolean>;
+  /** Optional timing telemetry from the most recent monitorTeam poll. */
+  monitorTimings?: {
+    list_tasks_ms: number;
+    worker_scan_ms: number;
+    mailbox_delivery_ms: number;
+    total_ms: number;
+    updated_at: string;
+  };
+}
+
+export interface TeamPhaseState {
+  current_phase: TeamPhase | TerminalPhase;
+  max_fix_attempts: number;
+  current_fix_attempt: number;
+  transitions: Array<{ from: string; to: string; at: string; reason?: string }>;
+  updated_at: string;
+}
+
+function teamPhasePath(teamName: string, cwd: string): string {
+  return join(teamDir(teamName, cwd), 'phase.json');
 }
 
 function monitorSnapshotPath(teamName: string, cwd: string): string {
@@ -1432,6 +1738,20 @@ export async function readMonitorSnapshot(
     const raw = await readFile(p, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<TeamMonitorSnapshotState>;
     if (!parsed || typeof parsed !== 'object') return null;
+    const monitorTimings = (() => {
+      const candidate = parsed.monitorTimings as TeamMonitorSnapshotState['monitorTimings'];
+      if (!candidate || typeof candidate !== 'object') return undefined;
+      if (
+        typeof candidate.list_tasks_ms !== 'number' ||
+        typeof candidate.worker_scan_ms !== 'number' ||
+        typeof candidate.mailbox_delivery_ms !== 'number' ||
+        typeof candidate.total_ms !== 'number' ||
+        typeof candidate.updated_at !== 'string'
+      ) {
+        return undefined;
+      }
+      return candidate;
+    })();
     return {
       taskStatusById: parsed.taskStatusById ?? {},
       workerAliveByName: parsed.workerAliveByName ?? {},
@@ -1439,6 +1759,8 @@ export async function readMonitorSnapshot(
       workerTurnCountByName: parsed.workerTurnCountByName ?? {},
       workerTaskIdByName: parsed.workerTaskIdByName ?? {},
       mailboxNotifiedByMessageId: parsed.mailboxNotifiedByMessageId ?? {},
+      completedEventTaskIds: parsed.completedEventTaskIds ?? {},
+      monitorTimings,
     };
   } catch {
     return null;
@@ -1451,6 +1773,37 @@ export async function writeMonitorSnapshot(
   cwd: string,
 ): Promise<void> {
   await writeAtomic(monitorSnapshotPath(teamName, cwd), JSON.stringify(snapshot, null, 2));
+}
+
+export async function readTeamPhase(
+  teamName: string,
+  cwd: string,
+): Promise<TeamPhaseState | null> {
+  const p = teamPhasePath(teamName, cwd);
+  if (!existsSync(p)) return null;
+  try {
+    const raw = await readFile(p, 'utf-8');
+    const parsed = JSON.parse(raw) as Partial<TeamPhaseState>;
+    if (!parsed || typeof parsed !== 'object') return null;
+    const currentPhase = typeof parsed.current_phase === 'string' ? parsed.current_phase : 'team-exec';
+    return {
+      current_phase: currentPhase as TeamPhase | TerminalPhase,
+      max_fix_attempts: typeof parsed.max_fix_attempts === 'number' ? parsed.max_fix_attempts : 3,
+      current_fix_attempt: typeof parsed.current_fix_attempt === 'number' ? parsed.current_fix_attempt : 0,
+      transitions: Array.isArray(parsed.transitions) ? parsed.transitions : [],
+      updated_at: typeof parsed.updated_at === 'string' ? parsed.updated_at : new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function writeTeamPhase(
+  teamName: string,
+  phaseState: TeamPhaseState,
+  cwd: string,
+): Promise<void> {
+  await writeAtomic(teamPhasePath(teamName, cwd), JSON.stringify(phaseState, null, 2));
 }
 
 // === Config persistence (public wrapper) ===

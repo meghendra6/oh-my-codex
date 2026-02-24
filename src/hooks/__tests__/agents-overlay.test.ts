@@ -46,11 +46,14 @@ describe('generateOverlay', () => {
   });
 
   it('generates overlay with active modes', async () => {
+    const sessionId = 'test-session-2';
+    const sessionDir = join(tempDir, '.omx', 'state', 'sessions', sessionId);
+    await mkdir(sessionDir, { recursive: true });
     await writeFile(
-      join(tempDir, '.omx', 'state', 'ralph-state.json'),
-      JSON.stringify({ active: true, iteration: 3, max_iterations: 10, current_phase: 'execution' })
+      join(sessionDir, 'ralph-state.json'),
+      JSON.stringify({ active: true, iteration: 3, max_iterations: 10, current_phase: 'executing' })
     );
-    const overlay = await generateOverlay(tempDir, 'test-session-2');
+    const overlay = await generateOverlay(tempDir, sessionId);
     assert.ok(overlay.includes('ralph'));
     assert.ok(overlay.includes('iteration 3/10'));
   });
@@ -95,7 +98,7 @@ describe('generateOverlay', () => {
     assert.ok(!overlay.includes('Low priority thing'));
   });
 
-  it('enforces size cap (overlay <= 2000 chars)', async () => {
+  it('enforces size cap (overlay <= 3500 chars)', async () => {
     const longText = 'A'.repeat(5000);
     await writeFile(join(tempDir, '.omx', 'notepad.md'), `## PRIORITY\n${longText}`);
     await writeFile(
@@ -104,16 +107,22 @@ describe('generateOverlay', () => {
     );
 
     const overlay = await generateOverlay(tempDir, 'test-session-5');
-    assert.ok(overlay.length <= 2000, `Overlay too large: ${overlay.length} chars`);
+    assert.ok(overlay.length <= 3500, `Overlay too large: ${overlay.length} chars`);
     assert.ok(overlay.includes('<!-- OMX:RUNTIME:START -->'));
     assert.ok(overlay.includes('<!-- OMX:RUNTIME:END -->'));
   });
 
   it('uses deterministic overflow policy under size cap', async () => {
+    const sessionId = 'overflow-session';
+    const sessionDir = join(tempDir, '.omx', 'state', 'sessions', sessionId);
+    await mkdir(sessionDir, { recursive: true });
     // Inflate optional sections so overflow behavior is exercised.
+    // Per-section truncation limits mean the total max body (~2640 chars) fits
+    // within MAX_OVERLAY_SIZE (3500), so we verify: size cap, required sections
+    // present, and determinism (identical output on repeated calls).
     for (let i = 0; i < 40; i++) {
       await writeFile(
-        join(tempDir, '.omx', 'state', `mode-${i}-state.json`),
+        join(sessionDir, `mode-${i}-state.json`),
         JSON.stringify({ active: true, iteration: i + 1, max_iterations: 99, current_phase: 'run' })
       );
     }
@@ -127,16 +136,14 @@ describe('generateOverlay', () => {
       })
     );
 
-    const overlay1 = await generateOverlay(tempDir, 'overflow-session');
-    const overlay2 = await generateOverlay(tempDir, 'overflow-session');
+    const overlay1 = await generateOverlay(tempDir, sessionId);
+    const overlay2 = await generateOverlay(tempDir, sessionId);
 
     for (const overlay of [overlay1, overlay2]) {
-      assert.ok(overlay.length <= 2000, `Overlay too large: ${overlay.length} chars`);
+      assert.ok(overlay.length <= 3500, `Overlay too large: ${overlay.length} chars`);
       assert.ok(overlay.includes('**Active Modes:**'));
       assert.ok(overlay.includes('**Priority Notes:**'));
       assert.ok(overlay.includes('**Compaction Protocol:**'));
-      // Lowest-priority section is dropped first.
-      assert.ok(!overlay.includes('**Project Context:**'));
     }
   });
 

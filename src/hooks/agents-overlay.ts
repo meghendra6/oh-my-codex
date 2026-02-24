@@ -6,6 +6,7 @@
  * for idempotent apply/strip cycles.
  *
  * Injected context:
+ * - Codebase map (directory/module structure for token-efficient exploration)
  * - Active mode state (ralph iteration, autopilot phase, etc.)
  * - Priority notepad content
  * - Project memory summary (tech stack, conventions, directives)
@@ -17,13 +18,14 @@ import { readFile, writeFile, mkdir, rm } from 'fs/promises';
 import { dirname, join } from 'path';
 import { existsSync } from 'fs';
 import { omxNotepadPath, omxProjectMemoryPath } from '../utils/paths.js';
-import { getBaseStateDir, getStateDir } from '../mcp/state-paths.js';
+import { getBaseStateDir, getStateDir, listModeStateFilesWithScopePreference } from '../mcp/state-paths.js';
+import { generateCodebaseMap } from './codebase-map.js';
 
 const START_MARKER = '<!-- OMX:RUNTIME:START -->';
 const END_MARKER = '<!-- OMX:RUNTIME:END -->';
 const WORKER_START_MARKER = '<!-- OMX:TEAM:WORKER:START -->';
 const WORKER_END_MARKER = '<!-- OMX:TEAM:WORKER:END -->';
-const MAX_OVERLAY_SIZE = 2000;
+const MAX_OVERLAY_SIZE = 3500;
 
 // ── Lock helpers ─────────────────────────────────────────────────────────────
 
@@ -126,25 +128,31 @@ interface OverlayData {
 }
 
 async function readActiveModes(cwd: string, sessionId?: string): Promise<string> {
-  const { readdir } = await import('fs/promises');
-  const scopedDirs = [getBaseStateDir(cwd), ...(sessionId ? [getStateDir(cwd, sessionId)] : [])];
-  const modes: string[] = [];
+  const refs = await listModeStateFilesWithScopePreference(cwd, sessionId);
 
-  for (const stateDir of scopedDirs) {
-    if (!existsSync(stateDir)) continue;
-    const files = await readdir(stateDir).catch(() => [] as string[]);
-    for (const f of files) {
-      if (!f.endsWith('-state.json') || f === 'session.json') continue;
-      try {
-        const data = JSON.parse(await readFile(join(stateDir, f), 'utf-8'));
-        if (data.active) {
-          const mode = f.replace('-state.json', '');
-          const details: string[] = [];
-          if (data.iteration !== undefined) details.push(`iteration ${data.iteration}/${data.max_iterations || '?'}`);
-          if (data.current_phase) details.push(`phase: ${data.current_phase}`);
-          modes.push(`- ${mode}: ${details.join(', ') || 'active'}`);
-        }
-      } catch { /* skip malformed */ }
+  // Compatibility fallback: when a session id is provided, keep root reads available
+  // if no session-scoped file exists for a mode.
+  const preferredByMode = new Map<string, { mode: string; path: string; scope: 'root' | 'session' }>();
+  if (sessionId) {
+    for (const ref of await listModeStateFilesWithScopePreference(cwd)) {
+      preferredByMode.set(ref.mode, ref);
+    }
+  }
+  for (const ref of refs) {
+    preferredByMode.set(ref.mode, ref);
+  }
+
+  const modes: string[] = [];
+  for (const ref of [...preferredByMode.values()].sort((a, b) => a.mode.localeCompare(b.mode))) {
+    try {
+      const data = JSON.parse(await readFile(ref.path, 'utf-8'));
+      if (!data.active) continue;
+      const details: string[] = [];
+      if (data.iteration !== undefined) details.push(`iteration ${data.iteration}/${data.max_iterations || '?'}`);
+      if (data.current_phase) details.push(`phase: ${data.current_phase}`);
+      modes.push(`- ${ref.mode}: ${details.join(', ') || 'active'}`);
+    } catch {
+      // Skip malformed mode state files.
     }
   }
 
@@ -206,10 +214,11 @@ function getCompactionInstructions(): string {
  * Total output is capped at MAX_OVERLAY_SIZE chars.
  */
 export async function generateOverlay(cwd: string, sessionId?: string): Promise<string> {
-  const [activeModes, notepadPriority, projectMemory] = await Promise.all([
+  const [activeModes, notepadPriority, projectMemory, codebaseMap] = await Promise.all([
     readActiveModes(cwd, sessionId),
     readNotepadPriority(cwd),
     readProjectMemorySummary(cwd),
+    generateCodebaseMap(cwd),
   ]);
 
   // Build sections with deterministic overflow behavior.
@@ -218,6 +227,15 @@ export async function generateOverlay(cwd: string, sessionId?: string): Promise<
   // Session metadata (max 200 chars) - required
   const sessionMeta = `**Session:** ${sessionId || 'unknown'} | ${new Date().toISOString()}`;
   sections.push({ key: 'session', text: truncate(sessionMeta, 200), optional: false });
+
+  // Codebase map (max 1000 chars) - optional, injected at session start for token-efficient exploration
+  if (codebaseMap) {
+    sections.push({
+      key: 'codebase_map',
+      text: `**Codebase Map:**\n${truncate(codebaseMap, 1000)}`,
+      optional: true,
+    });
+  }
 
   // Active modes (max 300 chars) - optional
   if (activeModes) {

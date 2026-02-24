@@ -1,20 +1,41 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildClientAttachedReconcileHookName,
+  assertTeamWorkerCliBinaryAvailable,
+  buildReconcileHudResizeArgs,
+  buildRegisterClientAttachedReconcileArgs,
+  buildRegisterResizeHookArgs,
+  buildResizeHookName,
+  buildResizeHookTarget,
+  buildScheduleDelayedHudResizeArgs,
+  buildUnregisterClientAttachedReconcileArgs,
+  buildUnregisterResizeHookArgs,
+  buildScrollCopyBindings,
   buildWorkerStartupCommand,
+  buildHudPaneTarget,
+  chooseTeamLeaderPaneId,
   createTeamSession,
   enableMouseScrolling,
+  isNativeWindows,
   isTmuxAvailable,
   isWsl2,
   isWorkerAlive,
   killWorker,
   killWorkerByPaneId,
   listTeamSessions,
-  resolveTeamMainPaneWidthPercentOption,
+  resolveTeamWorkerCli,
+  resolveWorkerCliForSend,
+  resolveTeamWorkerCliPlan,
+  buildWorkerSubmitPlan,
   sanitizeTeamName,
+  shouldAttemptAdaptiveRetry,
   sendToWorker,
+  sleepFractionalSeconds,
+  translateWorkerLaunchArgsForCli,
   waitForWorkerReady,
 } from '../tmux-session.js';
+import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_HEIGHT_LINES } from '../../hud/constants.js';
 
 function withEmptyPath<T>(fn: () => T): T {
   const prev = process.env.PATH;
@@ -42,14 +63,93 @@ describe('sanitizeTeamName', () => {
   });
 });
 
-describe('resolveTeamMainPaneWidthPercentOption', () => {
-  it('uses 50% default and clamps to 35..75%', () => {
-    assert.equal(resolveTeamMainPaneWidthPercentOption({}), '50%');
-    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: '35' }), '35%');
-    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: '75' }), '75%');
-    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: '10' }), '35%');
-    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: '99' }), '75%');
-    assert.equal(resolveTeamMainPaneWidthPercentOption({ OMX_TEAM_MAIN_PANE_WIDTH_PERCENT: 'abc' }), '50%');
+describe('chooseTeamLeaderPaneId', () => {
+  it('keeps preferred pane when it is not HUD', () => {
+    const panes = [
+      { paneId: '%1', currentCommand: 'node', startCommand: "'codex'" },
+      { paneId: '%2', currentCommand: 'node', startCommand: "node omx hud --watch" },
+    ];
+    assert.equal(chooseTeamLeaderPaneId(panes, '%1'), '%1');
+  });
+
+  it('switches away from HUD preferred pane to first non-HUD pane', () => {
+    const panes = [
+      { paneId: '%2', currentCommand: 'node', startCommand: "node omx hud --watch" },
+      { paneId: '%1', currentCommand: 'node', startCommand: "'codex'" },
+    ];
+    assert.equal(chooseTeamLeaderPaneId(panes, '%2'), '%1');
+  });
+
+  it('falls back to preferred pane when all panes are HUD panes', () => {
+    const panes = [
+      { paneId: '%2', currentCommand: 'node', startCommand: "node omx hud --watch" },
+      { paneId: '%3', currentCommand: 'node', startCommand: "node omx hud --watch" },
+    ];
+    assert.equal(chooseTeamLeaderPaneId(panes, '%2'), '%2');
+  });
+});
+
+describe('HUD resize hook command builders', () => {
+  it('buildResizeHookName normalizes all segments into collision-safe tokens', () => {
+    const name = buildResizeHookName('Team A', 'Session:Main', '0', '%12');
+    assert.equal(name, 'omx_resize_Team_A_Session_Main_0_12');
+  });
+
+  it('buildResizeHookTarget uses session:window format', () => {
+    assert.equal(buildResizeHookTarget('my-session', '3'), 'my-session:3');
+  });
+
+  it('buildHudPaneTarget always returns %<pane_id>', () => {
+    assert.equal(buildHudPaneTarget('%41'), '%41');
+    assert.equal(buildHudPaneTarget('41'), '%41');
+  });
+
+  it('buildRegisterResizeHookArgs uses window target and numeric client-resized hook slot', () => {
+    const args = buildRegisterResizeHookArgs('my-session:0', 'omx_resize_team_session_0_1', '%1');
+    assert.equal(args[0], 'set-hook');
+    assert.equal(args[1], '-t');
+    assert.equal(args[2], 'my-session:0');
+    assert.match(args[3] ?? '', /^client-resized\[\d+\]$/);
+    assert.equal(args[4], `run-shell -b 'tmux resize-pane -t %1 -y ${HUD_TMUX_HEIGHT_LINES}'`);
+  });
+
+  it('buildUnregisterResizeHookArgs removes the exact numeric hook slot', () => {
+    const registered = buildRegisterResizeHookArgs('my-session:0', 'omx_resize_team_session_0_1', '%1');
+    const unregistered = buildUnregisterResizeHookArgs('my-session:0', 'omx_resize_team_session_0_1');
+    assert.deepEqual(unregistered, ['set-hook', '-u', '-t', 'my-session:0', registered[3] as string]);
+  });
+
+  it('buildClientAttachedReconcileHookName normalizes all segments into collision-safe tokens', () => {
+    const name = buildClientAttachedReconcileHookName('Team A', 'Session:Main', '0', '%12');
+    assert.equal(name, 'omx_attached_Team_A_Session_Main_0_12');
+  });
+
+  it('buildRegisterClientAttachedReconcileArgs installs one-shot client-attached reconcile hook', () => {
+    const args = buildRegisterClientAttachedReconcileArgs('my-session:0', 'omx_attached_team_session_0_1', '%1');
+    assert.equal(args[0], 'set-hook');
+    assert.equal(args[1], '-t');
+    assert.equal(args[2], 'my-session:0');
+    assert.match(args[3] ?? '', /^client-attached\[\d+\]$/);
+    assert.match(args[4] ?? '', /^run-shell -b 'tmux resize-pane -t %1 -y \d+; tmux set-hook -u -t my-session:0 client-attached\[\d+\]'$/);
+  });
+
+  it('buildUnregisterClientAttachedReconcileArgs removes the exact numeric client-attached slot', () => {
+    const registered = buildRegisterClientAttachedReconcileArgs('my-session:0', 'omx_attached_team_session_0_1', '%1');
+    const unregistered = buildUnregisterClientAttachedReconcileArgs('my-session:0', 'omx_attached_team_session_0_1');
+    assert.deepEqual(unregistered, ['set-hook', '-u', '-t', 'my-session:0', registered[3] as string]);
+  });
+
+  it('buildScheduleDelayedHudResizeArgs schedules tmux-side delayed reconcile', () => {
+    assert.deepEqual(
+      buildScheduleDelayedHudResizeArgs('%1'),
+      ['run-shell', '-b', `sleep ${HUD_RESIZE_RECONCILE_DELAY_SECONDS}; tmux resize-pane -t %1 -y ${HUD_TMUX_HEIGHT_LINES}`],
+    );
+  });
+
+  it('buildReconcileHudResizeArgs is resize-only (no split-window)', () => {
+    const args = buildReconcileHudResizeArgs('%7');
+    assert.equal(args.includes('split-window'), false);
+    assert.deepEqual(args, ['resize-pane', '-t', '%7', '-y', String(HUD_TMUX_HEIGHT_LINES)]);
   });
 });
 
@@ -61,6 +161,13 @@ describe('sendToWorker validation', () => {
     );
   });
 
+  it('rejects empty/whitespace text', () => {
+    assert.throws(
+      () => sendToWorker('omx-team-x', 1, '   '),
+      /non-empty/i
+    );
+  });
+
   it('rejects injection marker', () => {
     assert.throws(
       () => sendToWorker('omx-team-x', 1, `hello [OMX_TMUX_INJECT]`),
@@ -69,7 +176,214 @@ describe('sendToWorker validation', () => {
   });
 });
 
+describe('shouldAttemptAdaptiveRetry', () => {
+  it('returns false when adaptive retry is disabled', () => {
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, false, '❯ hello', 'hello'),
+      false,
+    );
+  });
+
+  it('returns false when strategy is not auto', () => {
+    assert.equal(
+      shouldAttemptAdaptiveRetry('queue', true, true, '❯ hello', 'hello'),
+      false,
+    );
+  });
+
+  it('returns false when pane was not initially busy', () => {
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', false, true, '❯ hello', 'hello'),
+      false,
+    );
+  });
+
+  it('returns false when trigger text is missing from latest capture', () => {
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, '❯ ready prompt', 'hello'),
+      false,
+    );
+  });
+
+  it('returns false when latest capture still shows active task markers', () => {
+    const activeCapture = '• Doing work (2m 10s • esc to interrupt)\n❯ hello';
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, activeCapture, 'hello'),
+      false,
+    );
+  });
+
+  it('returns false when latest capture shows Claude active generation line', () => {
+    const activeCapture = '· Caramelizing…\n❯ hello';
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, activeCapture, 'hello'),
+      false,
+    );
+  });
+
+  it('returns false when latest capture shows Claude apostrophe generation line', () => {
+    const activeCapture = "· Beboppin'...\n❯ hello";
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, activeCapture, 'hello'),
+      false,
+    );
+  });
+
+  it('returns false when latest capture shows Claude sparkle generation line', () => {
+    const activeCapture = '✻ Pollinating…\n❯ hello';
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, activeCapture, 'hello'),
+      false,
+    );
+  });
+
+  it('does not treat non-ellipsis Claude bullet text as active generation', () => {
+    const readyCapture = '· Caramelizing\n❯ hello';
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, readyCapture, 'hello'),
+      true,
+    );
+  });
+
+  it('returns true only when auto+busy and latest capture is ready with visible text', () => {
+    const readyCapture = '❯ hello';
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, readyCapture, 'hello'),
+      true,
+    );
+  });
+});
+
 describe('buildWorkerStartupCommand', () => {
+  it('auto-selects claude worker CLI from claude model', () => {
+    const prevShell = process.env.SHELL;
+    const prevCli = process.env.OMX_TEAM_WORKER_CLI;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.SHELL = '/bin/bash';
+    delete process.env.OMX_TEAM_WORKER_CLI; // auto
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const cmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'claude-3-7-sonnet']);
+      assert.match(cmd, /exec claude/);
+      assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
+      assert.doesNotMatch(cmd, /--model/);
+      assert.doesNotMatch(cmd, /model_instructions_file=/);
+    } finally {
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('respects explicit OMX_TEAM_WORKER_CLI override', () => {
+    const prevShell = process.env.SHELL;
+    const prevCli = process.env.OMX_TEAM_WORKER_CLI;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.SHELL = '/bin/bash';
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      process.env.OMX_TEAM_WORKER_CLI = 'codex';
+      const codexCmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'claude-3-7-sonnet']);
+      assert.match(codexCmd, /exec codex/);
+
+      process.env.OMX_TEAM_WORKER_CLI = 'claude';
+      const claudeCmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'gpt-5']);
+      assert.match(claudeCmd, /exec claude/);
+      assert.equal((claudeCmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
+      assert.doesNotMatch(claudeCmd, /--model/);
+    } finally {
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('applies claude skip-permissions when worker CLI is provided by plan override', () => {
+    const prevShell = process.env.SHELL;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.SHELL = '/bin/bash';
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const cmd = buildWorkerStartupCommand(
+        'alpha',
+        1,
+        ['--model', 'gpt-5', '--dangerously-bypass-approvals-and-sandbox'],
+        process.cwd(),
+        {},
+        'claude',
+      );
+      assert.match(cmd, /exec claude/);
+      assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
+      assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
+      assert.doesNotMatch(cmd, /--model/);
+    } finally {
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('drops all explicit launch args for claude workers', () => {
+    const prevShell = process.env.SHELL;
+    const prevCli = process.env.OMX_TEAM_WORKER_CLI;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.SHELL = '/bin/bash';
+    process.env.OMX_TEAM_WORKER_CLI = 'claude';
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const cmd = buildWorkerStartupCommand('alpha', 1, [
+        '--dangerously-bypass-approvals-and-sandbox',
+        '-c', 'model_instructions_file="/tmp/custom.md"',
+        '--model', 'claude-3-7-sonnet',
+      ]);
+      assert.match(cmd, /exec claude/);
+      assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
+      assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
+      assert.doesNotMatch(cmd, /model_instructions_file=/);
+      assert.doesNotMatch(cmd, /--model/);
+      assert.doesNotMatch(cmd, /claude-3-7-sonnet/);
+    } finally {
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('does not pass bypass flags in claude mode', () => {
+    const prevArgv = process.argv;
+    const prevShell = process.env.SHELL;
+    const prevCli = process.env.OMX_TEAM_WORKER_CLI;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.SHELL = '/bin/bash';
+    process.env.OMX_TEAM_WORKER_CLI = 'claude';
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    process.argv = [...prevArgv, '--madmax'];
+    try {
+      const cmd = buildWorkerStartupCommand('alpha', 1);
+      assert.match(cmd, /exec claude/);
+      assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
+      assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
+    } finally {
+      process.argv = prevArgv;
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevCli === 'string') process.env.OMX_TEAM_WORKER_CLI = prevCli;
+      else delete process.env.OMX_TEAM_WORKER_CLI;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
   it('uses zsh with ~/.zshrc and exec codex', () => {
     const prevShell = process.env.SHELL;
     process.env.SHELL = '/bin/zsh';
@@ -100,6 +414,32 @@ describe('buildWorkerStartupCommand', () => {
       assert.match(cmd, /exec codex/);
       assert.match(cmd, /--model/);
       assert.match(cmd, /gpt-5/);
+    } finally {
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('injects canonical team state env vars when provided', () => {
+    const prevShell = process.env.SHELL;
+    process.env.SHELL = '/bin/bash';
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const cmd = buildWorkerStartupCommand(
+        'alpha',
+        1,
+        [],
+        '/tmp/worker-cwd',
+        {
+          OMX_TEAM_STATE_ROOT: '/tmp/leader/.omx/state',
+          OMX_TEAM_LEADER_CWD: '/tmp/leader',
+        },
+      );
+      assert.match(cmd, /OMX_TEAM_STATE_ROOT=\/tmp\/leader\/\.omx\/state/);
+      assert.match(cmd, /OMX_TEAM_LEADER_CWD=\/tmp\/leader/);
     } finally {
       if (typeof prevShell === 'string') process.env.SHELL = prevShell;
       else delete process.env.SHELL;
@@ -228,6 +568,122 @@ describe('buildWorkerStartupCommand', () => {
   });
 });
 
+describe('team worker CLI helpers', () => {
+  it('resolveTeamWorkerCli auto-detects claude models', () => {
+    assert.equal(resolveTeamWorkerCli(['--model', 'claude-3-7-sonnet'], {}), 'claude');
+    assert.equal(resolveTeamWorkerCli(['--model=claude-sonnet-4-6'], {}), 'claude');
+    assert.equal(resolveTeamWorkerCli(['--model', 'gpt-5'], {}), 'codex');
+    assert.equal(resolveTeamWorkerCli([], {}), 'codex');
+  });
+
+  it('translateWorkerLaunchArgsForCli preserves args for codex', () => {
+    const args = ['--model', 'gpt-5', '-c', 'model_reasoning_effort="xhigh"'];
+    assert.deepEqual(translateWorkerLaunchArgsForCli('codex', args), args);
+  });
+
+  it('translateWorkerLaunchArgsForCli returns only skip-permissions for claude', () => {
+    assert.deepEqual(
+      translateWorkerLaunchArgsForCli('claude', ['-c', 'model_reasoning_effort="xhigh"', '--model', 'claude-3-7-sonnet']),
+      ['--dangerously-skip-permissions'],
+    );
+  });
+
+  it('assertTeamWorkerCliBinaryAvailable throws clear error when binary missing', () => {
+    assert.throws(
+      () => assertTeamWorkerCliBinaryAvailable('claude', () => false),
+      /not available on PATH/i,
+    );
+  });
+
+  it('resolveTeamWorkerCliPlan supports mixed per-worker CLI map', () => {
+    const plan = resolveTeamWorkerCliPlan(
+      4,
+      [],
+      { OMX_TEAM_WORKER_CLI_MAP: 'codex,codex,claude,claude' },
+    );
+    assert.deepEqual(plan, ['codex', 'codex', 'claude', 'claude']);
+  });
+
+  it('resolveTeamWorkerCliPlan accepts single-value map and expands to all workers', () => {
+    const plan = resolveTeamWorkerCliPlan(
+      3,
+      [],
+      { OMX_TEAM_WORKER_CLI_MAP: 'claude' },
+    );
+    assert.deepEqual(plan, ['claude', 'claude', 'claude']);
+  });
+
+  it('resolveTeamWorkerCliPlan supports auto entries in CLI map', () => {
+    const plan = resolveTeamWorkerCliPlan(
+      2,
+      ['--model', 'claude-3-7-sonnet'],
+      { OMX_TEAM_WORKER_CLI_MAP: 'auto,codex' },
+    );
+    assert.deepEqual(plan, ['claude', 'codex']);
+  });
+
+  it('resolveTeamWorkerCliPlan auto entries ignore OMX_TEAM_WORKER_CLI override', () => {
+    const plan = resolveTeamWorkerCliPlan(
+      1,
+      ['--model', 'claude-3-7-sonnet'],
+      {
+        OMX_TEAM_WORKER_CLI: 'codex',
+        OMX_TEAM_WORKER_CLI_MAP: 'auto',
+      },
+    );
+    assert.deepEqual(plan, ['claude']);
+  });
+
+  it('resolveTeamWorkerCliPlan rejects map lengths that do not match workerCount', () => {
+    assert.throws(
+      () => resolveTeamWorkerCliPlan(4, [], { OMX_TEAM_WORKER_CLI_MAP: 'codex,claude' }),
+      /expected 1 or 4/i,
+    );
+  });
+
+  it('resolveTeamWorkerCliPlan rejects empty entries in CLI map', () => {
+    assert.throws(
+      () => resolveTeamWorkerCliPlan(2, [], { OMX_TEAM_WORKER_CLI_MAP: 'codex,' }),
+      /empty entries are not allowed/i,
+    );
+  });
+
+  it('resolveTeamWorkerCliPlan reports invalid entry errors with OMX_TEAM_WORKER_CLI_MAP', () => {
+    assert.throws(
+      () => resolveTeamWorkerCliPlan(1, [], { OMX_TEAM_WORKER_CLI_MAP: 'claudee' }),
+      /OMX_TEAM_WORKER_CLI_MAP/i,
+    );
+  });
+
+  it('resolveWorkerCliForSend prioritizes explicit worker CLI over map/global', () => {
+    assert.equal(
+      resolveWorkerCliForSend(2, 'claude', [], { OMX_TEAM_WORKER_CLI_MAP: 'codex,codex' }),
+      'claude',
+    );
+  });
+
+  it('resolveWorkerCliForSend resolves per-worker map entry by index', () => {
+    assert.equal(
+      resolveWorkerCliForSend(2, undefined, [], { OMX_TEAM_WORKER_CLI_MAP: 'codex,claude' }),
+      'claude',
+    );
+  });
+
+  it('buildWorkerSubmitPlan disables queue-first for claude workers', () => {
+    const plan = buildWorkerSubmitPlan('auto', 'claude', true, true);
+    assert.equal(plan.queueFirstRound, false);
+    assert.equal(plan.submitKeyPressesPerRound, 1);
+    assert.equal(plan.allowAdaptiveRetry, false);
+  });
+
+  it('buildWorkerSubmitPlan preserves queue-first behavior for busy codex workers', () => {
+    const plan = buildWorkerSubmitPlan('auto', 'codex', true, true);
+    assert.equal(plan.queueFirstRound, true);
+    assert.equal(plan.submitKeyPressesPerRound, 2);
+    assert.equal(plan.allowAdaptiveRetry, true);
+  });
+});
+
 describe('tmux-dependent functions when tmux is unavailable', () => {
   it('isTmuxAvailable returns false', () => {
     withEmptyPath(() => {
@@ -310,6 +766,60 @@ describe('isWsl2', () => {
   });
 });
 
+describe('isNativeWindows', () => {
+  it('returns true when process.platform is win32 and not WSL2', () => {
+    const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const prevDistro = process.env.WSL_DISTRO_NAME;
+    const prevInterop = process.env.WSL_INTEROP;
+    delete process.env.WSL_DISTRO_NAME;
+    delete process.env.WSL_INTEROP;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      assert.equal(isNativeWindows(), true);
+    } finally {
+      if (origPlatform) Object.defineProperty(process, 'platform', origPlatform);
+      if (typeof prevDistro === 'string') process.env.WSL_DISTRO_NAME = prevDistro;
+      else delete process.env.WSL_DISTRO_NAME;
+      if (typeof prevInterop === 'string') process.env.WSL_INTEROP = prevInterop;
+      else delete process.env.WSL_INTEROP;
+    }
+  });
+
+  it('returns false when process.platform is win32 but WSL2 is detected', () => {
+    const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const prevDistro = process.env.WSL_DISTRO_NAME;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.env.WSL_DISTRO_NAME = 'Ubuntu-22.04';
+    try {
+      assert.equal(isNativeWindows(), false);
+    } finally {
+      if (origPlatform) Object.defineProperty(process, 'platform', origPlatform);
+      if (typeof prevDistro === 'string') process.env.WSL_DISTRO_NAME = prevDistro;
+      else delete process.env.WSL_DISTRO_NAME;
+    }
+  });
+
+  it('returns false on Linux', () => {
+    const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    try {
+      assert.equal(isNativeWindows(), false);
+    } finally {
+      if (origPlatform) Object.defineProperty(process, 'platform', origPlatform);
+    }
+  });
+
+  it('returns false on macOS', () => {
+    const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    try {
+      assert.equal(isNativeWindows(), false);
+    } finally {
+      if (origPlatform) Object.defineProperty(process, 'platform', origPlatform);
+    }
+  });
+});
+
 describe('enableMouseScrolling', () => {
   it('returns false when tmux is unavailable', () => {
     // When tmux is not on PATH, enableMouseScrolling should gracefully return false
@@ -369,6 +879,104 @@ describe('killWorkerByPaneId leader pane guard', () => {
     withEmptyPath(() => {
       assert.doesNotThrow(() => killWorkerByPaneId('%5'));
     });
+  });
+});
+
+describe('sleepFractionalSeconds', () => {
+  it('uses ceil(ms) so sub-millisecond positive values still sleep', () => {
+    const calls: number[] = [];
+    const captureSleep = (ms: number): void => {
+      calls.push(ms);
+    };
+
+    sleepFractionalSeconds(0.1, captureSleep);
+    sleepFractionalSeconds(0.0001, captureSleep);
+
+    assert.deepEqual(calls, [100, 1]);
+  });
+
+  it('ignores invalid values and clamps extreme sleeps to 60s max', () => {
+    const calls: number[] = [];
+    const captureSleep = (ms: number): void => {
+      calls.push(ms);
+    };
+
+    sleepFractionalSeconds(0, captureSleep);
+    sleepFractionalSeconds(-1, captureSleep);
+    sleepFractionalSeconds(NaN, captureSleep);
+    sleepFractionalSeconds(Number.POSITIVE_INFINITY, captureSleep);
+    sleepFractionalSeconds(999_999, captureSleep);
+
+    assert.deepEqual(calls, [60_000]);
+  });
+});
+
+describe('buildScrollCopyBindings (issue #206)', () => {
+  it('returns a non-empty array of tmux command arg arrays', () => {
+    const bindings = buildScrollCopyBindings();
+    assert.ok(Array.isArray(bindings));
+    assert.ok(bindings.length > 0);
+    for (const b of bindings) {
+      assert.ok(Array.isArray(b), 'each binding must be an array');
+      assert.ok(b.length > 0, 'each binding must have at least one element');
+      assert.equal(typeof b[0], 'string', 'first element must be a string');
+    }
+  });
+
+  it('includes WheelUpPane binding that enters copy-mode (fixes viewport scroll)', () => {
+    const bindings = buildScrollCopyBindings();
+    const wheelUp = bindings.find((b) => b.includes('WheelUpPane'));
+    assert.ok(wheelUp, 'WheelUpPane binding must be present');
+    assert.ok(wheelUp.some((tok) => tok.includes('copy-mode')), 'WheelUpPane binding must activate copy-mode');
+    assert.ok(wheelUp.some((tok) => tok.includes('pane_in_mode')), 'WheelUpPane must check pane_in_mode to avoid double-entry');
+  });
+
+  it('WheelUpPane binding is in the root key table (-n flag)', () => {
+    const bindings = buildScrollCopyBindings();
+    const wheelUp = bindings.find((b) => b.includes('WheelUpPane'));
+    assert.ok(wheelUp, 'WheelUpPane binding must be present');
+    const nIdx = wheelUp.indexOf('-n');
+    assert.ok(nIdx !== -1, 'WheelUpPane binding must use -n (root table) flag');
+    assert.equal(wheelUp[nIdx + 1], 'WheelUpPane');
+  });
+
+  it('includes MouseDragEnd1Pane binding that copies selection to clipboard (fixes copy)', () => {
+    const bindings = buildScrollCopyBindings();
+    const dragEnd = bindings.find((b) => b.includes('MouseDragEnd1Pane'));
+    assert.ok(dragEnd, 'MouseDragEnd1Pane binding must be present');
+    assert.ok(dragEnd.includes('copy-selection-and-cancel'), 'drag-end binding must copy the selection');
+  });
+
+  it('MouseDragEnd1Pane binding is in copy-mode key table (-T copy-mode)', () => {
+    const bindings = buildScrollCopyBindings();
+    const dragEnd = bindings.find((b) => b.includes('MouseDragEnd1Pane'));
+    assert.ok(dragEnd, 'MouseDragEnd1Pane binding must be present');
+    const tIdx = dragEnd.indexOf('-T');
+    assert.ok(tIdx !== -1, 'drag-end binding must specify a key table with -T');
+    assert.equal(dragEnd[tIdx + 1], 'copy-mode', 'drag-end binding must be in copy-mode table');
+  });
+});
+
+describe('enableMouseScrolling scroll and copy setup (issue #206)', () => {
+  it('returns false gracefully when scroll-copy setup fails because tmux is unavailable', () => {
+    // With empty PATH the initial "mouse on" call fails, so the function returns
+    // false before any binding calls are made. No throw must occur.
+    withEmptyPath(() => {
+      assert.equal(enableMouseScrolling('omx-team-x'), false);
+    });
+  });
+
+  it('does not throw when WSL2 env is set and tmux is unavailable (regression + #206)', () => {
+    const prev = process.env.WSL_DISTRO_NAME;
+    process.env.WSL_DISTRO_NAME = 'Ubuntu-22.04';
+    try {
+      withEmptyPath(() => {
+        assert.doesNotThrow(() => enableMouseScrolling('omx-team-x'));
+      });
+    } finally {
+      if (typeof prev === 'string') process.env.WSL_DISTRO_NAME = prev;
+      else delete process.env.WSL_DISTRO_NAME;
+    }
   });
 });
 

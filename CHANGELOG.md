@@ -2,6 +2,140 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+## [0.6.4] - 2026-02-24
+
+### Fixed
+- Team Claude worker startup now explicitly launches with `--dangerously-skip-permissions`, preventing interactive permission prompts during tmux team runs.
+
+### Tests
+- Added regression coverage for the worker CLI override path to ensure Claude launch args are translated correctly and Codex-only flags are not forwarded.
+
+## [0.6.3] - 2026-02-24
+
+### Added
+- Client-attached HUD reconcile hook for detached-launch initial pane layout reconciliation.
+
+### Fixed
+- Hardened detached session resize hook flow to prevent race conditions when tmux windows drift.
+- Hardened HUD/team resize reconciliation for consistent pane organization across attach/detach cycles.
+- Reduced HUD delayed reconcile fallback from 10s to 2s for faster layout correction.
+- Client-attached hook is now tracked and properly unregistered during rollback.
+
+### Tests
+- Added tmux session and CLI sequencing tests for resize/reconcile paths.
+
+## [0.6.2] - 2026-02-24
+
+### Fixed
+- Team Claude worker launch now uses plain `claude` with no injected launch args, so local `settings.json` remains authoritative.
+- Team startup resolution logging is now Claude-aware: Claude paths report `model=claude source=local-settings` and omit `thinking_level`.
+
+### Changed
+- Clarified docs for Team worker CLI behavior in README and `skills/team/SKILL.md` to reflect plain-Claude launch semantics.
+- Added regression coverage to preserve Codex reasoning behavior while enforcing Claude no-args launch behavior.
+
+## [0.6.1] - 2026-02-23
+
+### Added
+- Added a new "What's New in 0.6.0" section to the docs site homepage with highlights for mixed Codex/Claude teammates and reliability updates.
+
+### Changed
+- Clarified `skills/team/SKILL.md` docs that `N:agent-type` selects worker role prompts (not CLI choice), and documented `OMX_TEAM_WORKER_CLI` / `OMX_TEAM_WORKER_CLI_MAP` usage for launching Claude teammates.
+
+## [0.6.0] - 2026-02-23
+
+### Added
+- Mixed team worker CLI routing via `OMX_TEAM_WORKER_CLI_MAP` so a single `$team` run can launch Codex and Claude workers together (e.g. `codex,codex,claude,claude`).
+- Leader-side all-workers-idle nudge fallback for Claude teams, so leader notifications still fire even when worker-side Codex hooks are unavailable.
+- Adaptive trigger submit retry guard helper and tests to reduce false-positive resend escalation.
+
+### Changed
+- Team trigger fallback now uses a safer ready-prompt + non-active-task gate before adaptive resend.
+- Adaptive retry fallback behavior now uses clear-line + resend instead of interrupt escalation in auto mode.
+
+### Fixed
+- Pre-assigned worker tasks can now be claimed by their assigned owner in `pending` state, unblocking Codex worker bootstrap claim flow.
+- `OMX_TEAM_WORKER_CLI_MAP` parsing now rejects empty entries and reports map-specific validation errors.
+- `OMX_TEAM_WORKER_CLI_MAP=auto` now resolves from launch args/model detection and no longer inherits `OMX_TEAM_WORKER_CLI` overrides unexpectedly.
+- Team leader nudge targeting now prioritizes `leader_pane_id`, improving reliability with mixed/Claude worker setups.
+
+## [0.5.1] - 2026-02-23
+
+### Added
+- **Native worktree orchestration for team mode**: Workers now launch in git worktrees with canonical state-root metadata, enabling true isolation for parallel team workstreams.
+- **Cross-worktree team state resolution**: MCP state tools and the notify hook resolve team state across worktrees, so the leader always sees the correct shared state regardless of which worktree a worker is running in.
+- **`omx ralph` CLI subcommand**: `omx ralph "<task>"` starts a ralph persistence loop directly from the command line, removing the need to manually invoke the skill inside a session (closes #153).
+- **Scoped ralph state with canonical persistence migration**: Ralph state is now scoped per session/worktree and migrated from legacy flat paths to the canonical `.omx/state/sessions/` layout automatically.
+- **Claim-safe team transition tool for MCP interop**: New `team_transition_task` MCP tool applies state transitions atomically with claim-token verification, preventing race conditions between concurrent workers.
+- **Clean tmux pane output before notifications**: Notification content is sanitized (ANSI escapes, tmux artifacts stripped) before being sent to notification integrations, eliminating garbled messages.
+- **Startup codebase map injection hook**: Session start injects a lightweight file-tree snapshot into the agent context so workers have structural awareness of the project without extra exploration turns (closes #136).
+
+### Changed
+- **`notify-hook.js` refactored into layered sub-modules**: The monolithic hook script is split into focused modules (event routing, tmux integration, notification dispatch) for maintainability and easier extension (closes #177).
+- **`ralplan` defaults to non-interactive consensus mode**: The planning loop no longer pauses for interactive prompts by default; pass `--interactive` to restore the prompt-gated flow (closes #144).
+- **Removed `/research` skill**: The `$research` skill has been fully removed. Use `$scientist` for data/analysis tasks or `$external-context` for web searches (closes #148).
+
+### Fixed
+
+#### Security
+- **Command injection in `capturePaneContent`** prevented by switching from string shell interpolation to a safe argument array (closes #156).
+- **Command injection in notifier** fixed by replacing `exec` string interpolation with `execFile` + args array (closes #157).
+- **Stale/reused PID risk in reply-listener**: The process-kill path now verifies process identity before sending signals, preventing an unrelated process from being killed if a PID is recycled (closes #158).
+- **Path traversal in MCP state/team tool identifiers**: Tool inputs are validated and normalized to prevent `../` escapes from reaching the filesystem (closes #159).
+- **Untracked files excluded from codebase map** to prevent accidental filename leakage of unintended files into agent context.
+
+#### Team / Claim Lifecycle
+- Claim lease expiry enforced in task transition and release flows — expired claims are rejected before any state mutation (closes #176).
+- Duplicate `task_completed` events from `monitorTeam` eliminated; events are deduplicated at the source (closes #161).
+- `claimTask` returns `task_not_found` (not a generic error) for missing task IDs, improving worker error handling (closes #167).
+- Claims on already-completed or already-failed tasks are rejected upfront (closes #160).
+- Ghost worker IDs (workers that no longer exist) are rejected in `claimTask` (closes #179).
+- Terminal → non-terminal status regressions in `transitionTaskStatus` are blocked; once a task reaches `completed`/`failed`, its status cannot be unwound.
+- In-progress claim takeover prevented when `expected_version` is omitted from the request (closes #173).
+- `releaseTaskClaim` no longer reopens a terminal task — release on a completed/failed task is a no-op (closes #174).
+- `task_failed` event is now emitted instead of the misleading `worker_stopped` event on task failure (closes #171).
+- `team_update_task` rejects lifecycle field mutations (`status`, `claimed_by`) that arrive without a valid claim token (closes #172).
+- `updateTask` payload validation added to prevent partial/corrupted task objects from being persisted (closes #163).
+- `team_leader_nudge` added to the `team_append_event` MCP schema enum so the nudge event passes schema validation (closes #175).
+- Canonical session names used consistently in `getTeamTmuxSessions` (closes #170).
+
+#### Worktree / CLI
+- `--worktree <name>` space-separated argument form is now consumed correctly; previously the branch name was silently dropped (closes #203).
+- Orphan `--model` flag dropped from worker argv to prevent duplicate flags causing Codex CLI parse errors (closes #162).
+- `spawnSync` sleep replaced with `Atomics.wait` so timing delays work reliably even when the `sleep` binary is absent (closes #164).
+
+#### Hooks / tmux
+- Copy-mode scroll and clipboard copy re-enabled in `xhigh`/`madmax` tmux sessions (closes #206).
+- Thin orchestrator restored in `notify-hook.js` after refactor inadvertently removed it (closes #205).
+
+#### Dependencies
+- `ajv` pinned to `>=8.18.0` and `hono` to `>=4.11.10` via npm `overrides` to resolve transitive vulnerability advisories.
+
+### Performance
+- `listTasks` file reads parallelized with `Promise.all`, reducing task-list latency for teams with many tasks (closes #168).
+
+## [0.5.0] - 2026-02-21
+
+### Added
+- Consolidated the prompt/skill catalog and hardened team runtime contracts after the mainline merge (PR #137).
+- Added setup scope-aware install modes (`user`, `project-local`, `project`) with persisted scope behavior.
+- Added spark worker routing via `--spark` / `--madmax-spark` so team workers can use `gpt-5.3-codex-spark` without forcing the leader model.
+- Added notifier verbosity levels for CCNotifier output control.
+
+### Changed
+- Updated setup and docs references to match the consolidated catalog and current supported prompt/skill surfaces.
+
+### Fixed
+- Hardened tmux runtime behavior, including pane targeting and input submission reliability.
+- Hardened tmux pane capture input handling (post-review fix).
+- Removed stale references to removed `scientist` prompt and `pipeline` skill (post-review fix).
+
+### Removed
+- Removed deprecated prompts: `deep-executor`, `scientist`.
+- Removed deprecated skills: `deepinit`, `learn-about-omx`, `learner`, `pipeline`, `project-session-manager`, `psm`, `release`, `ultrapilot`, `writer-memory`.
+
 ## [0.4.4] - 2026-02-19
 
 ### Added

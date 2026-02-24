@@ -63,17 +63,12 @@ Recommended trusted-environment launch profile:
 omx --xhigh --madmax
 ```
 
-## New in v0.4.0
+## New in v0.5.0
 
-- **Hook extension workflow** with `omx hooks` (`init|status|validate|test`) for additive plugin-based automation.
-- **Native hook runtime integration** for `session-start`, `session-end`, `session-idle`, and `turn-complete` event dispatch.
-- **tmux reliability hardening** by standardizing submit key behavior to `C-m` across the codebase.
-
-Try it:
-
-```bash
-OMX_HOOK_PLUGINS=1 omx hooks test
-```
+- **Scope-aware setup** with `omx setup --scope user|project-local|project` for flexible install modes.
+- **Spark worker routing** via `--spark` / `--madmax-spark` so team workers can use `gpt-5.3-codex-spark` without forcing the leader model.
+- **Catalog consolidation** — removed deprecated prompts (`deep-executor`, `scientist`) and 9 deprecated skills for a leaner surface.
+- **Notifier verbosity levels** for fine-grained CCNotifier output control.
 
 ## First Session
 
@@ -102,8 +97,8 @@ OMX installs and wires these layers:
 User
   -> Codex CLI
     -> AGENTS.md (orchestration brain)
-    -> ~/.codex/prompts/*.md (30 agent prompts)
-    -> ~/.agents/skills/*/SKILL.md (40 skills)
+    -> ~/.codex/prompts/*.md (agent prompt catalog)
+    -> ~/.agents/skills/*/SKILL.md (skill catalog)
     -> ~/.codex/config.toml (features, notify, MCP)
     -> .omx/ (runtime state, memory, plans, logs)
 ```
@@ -112,7 +107,7 @@ User
 
 ```bash
 omx                # Launch Codex (+ HUD in tmux when available)
-omx setup          # Install prompts, skills, config wiring, AGENTS.md
+omx setup          # Install prompts/skills/config by scope + project AGENTS.md/.omx
 omx doctor         # Installation/runtime diagnostics
 omx doctor --team  # Team/swarm diagnostics
 omx team ...       # Start/status/resume/shutdown tmux team workers
@@ -146,6 +141,7 @@ See `docs/hooks-extension.md` for the full extension workflow and event model.
 --force
 --dry-run
 --verbose
+--scope <user|project-local|project>  # setup only
 ```
 
 `--madmax` maps to Codex `--dangerously-bypass-approvals-and-sandbox`.
@@ -190,11 +186,32 @@ omx team shutdown <team-name>
 
 Important rule: do not shutdown while tasks are still `in_progress` unless aborting.
 
+Worker CLI selection for team workers:
+
+```bash
+OMX_TEAM_WORKER_CLI=auto    # default; uses claude when worker --model contains "claude"
+OMX_TEAM_WORKER_CLI=codex   # force Codex CLI workers
+OMX_TEAM_WORKER_CLI=claude  # force Claude CLI workers
+OMX_TEAM_WORKER_CLI_MAP=codex,codex,claude,claude  # per-worker CLI mix (len=1 or worker count)
+OMX_TEAM_AUTO_INTERRUPT_RETRY=0  # optional: disable adaptive queue->resend fallback
+```
+
+Notes:
+- Worker launch args are still shared via `OMX_TEAM_WORKER_LAUNCH_ARGS`.
+- `OMX_TEAM_WORKER_CLI_MAP` overrides `OMX_TEAM_WORKER_CLI` for per-worker selection.
+- Trigger submission uses adaptive retries by default (queue/submit, then safe clear-line+resend fallback when needed).
+- In Claude worker mode, OMX spawns workers as plain `claude` (no extra launch args) and ignores explicit `--model` / `--config` / `--effort` overrides so Claude uses default `settings.json`.
+
 ## What `omx setup` writes
 
-- `~/.codex/prompts/` (30 prompt files)
-- `~/.agents/skills/` (40 skills)
-- `~/.codex/config.toml` updates:
+- `.omx/setup-scope.json` (persisted setup scope)
+- Scope-dependent installs:
+  - `user`: `~/.codex/prompts/`, `~/.agents/skills/`, `~/.codex/config.toml`, `~/.omx/agents/`
+  - `project-local`: `./.codex/prompts/`, `./.agents/skills/`, `./.codex/config.toml`, `./.omx/agents/`
+  - `project`: skips prompt/skill/config/native-agent installs
+- Launch behavior: if persisted scope is `project-local`, `omx` launch auto-uses `CODEX_HOME=./.codex` (unless `CODEX_HOME` is already set).
+- Existing `AGENTS.md` is preserved unless `--force` is used (and active-session safety checks still apply).
+- `config.toml` updates (for `user`/`project-local` scopes):
   - `notify = ["node", "..."]`
   - `model_reasoning_effort = "high"`
   - `developer_instructions = "..."`
@@ -206,13 +223,12 @@ Important rule: do not shutdown while tasks are still `in_progress` unless abort
 
 ## Agents and Skills
 
-- Prompts: `prompts/*.md` (installed to `~/.codex/prompts/`)
-- Skills: `skills/*/SKILL.md` (installed to `~/.agents/skills/`)
+- Prompts: `prompts/*.md` (installed to `~/.codex/prompts/` for `user`, `./.codex/prompts/` for `project-local`)
+- Skills: `skills/*/SKILL.md` (installed to `~/.agents/skills/` for `user`, `./.agents/skills/` for `project-local`)
 
 Examples:
 - Agents: `architect`, `planner`, `executor`, `debugger`, `verifier`, `security-reviewer`
-- `deep-executor` is deprecated; use `executor` for complex implementation tasks.
-- Skills: `autopilot`, `plan`, `team`, `ralph`, `ultrawork`, `ultrapilot`, `research`, `cancel`
+- Skills: `autopilot`, `plan`, `team`, `ralph`, `ultrawork`, `cancel`
 
 ## Project Layout
 
@@ -247,6 +263,8 @@ npm test
 
 ## Notes
 
+- Release notes: `CHANGELOG.md`
+- Migration guide (post-v0.4.4 mainline): `docs/migration-mainline-post-v0.4.4.md`
 - Coverage and parity notes: `COVERAGE.md`
 - Hook extension workflow: `docs/hooks-extension.md`
 - Setup and contribution details: `CONTRIBUTING.md`

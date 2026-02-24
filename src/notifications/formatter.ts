@@ -8,6 +8,35 @@
 import type { FullNotificationPayload } from "./types.js";
 import { basename } from "path";
 
+/** ANSI CSI escape sequences (e.g. colors, cursor movement) */
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+/** OMC UI chrome: spinner/progress indicator characters */
+const SPINNER_LINE_RE = /^[●⎿✻·◼]/;
+
+/** tmux expand hint injected by some pane-capture scripts */
+const CTRL_O_RE = /ctrl\+o to expand/i;
+
+/**
+ * Parse raw tmux pane output into clean, human-readable text suitable for
+ * inclusion in a notification message.
+ *
+ * - Strips ANSI escape codes
+ * - Removes UI chrome lines (spinner/progress characters: ●⎿✻·◼)
+ * - Removes "ctrl+o to expand" hint lines
+ * - Caps at the last 10 meaningful (non-empty) lines
+ */
+export function parseTmuxTail(raw: string): string {
+  const lines = raw
+    .split("\n")
+    .map((line) => line.replace(ANSI_RE, "").trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !SPINNER_LINE_RE.test(line))
+    .filter((line) => !CTRL_O_RE.test(line));
+
+  return lines.slice(-10).join("\n");
+}
+
 function formatDuration(ms?: number): string {
   if (!ms) return "unknown";
   const seconds = Math.floor(ms / 1000);
@@ -27,6 +56,13 @@ function projectDisplay(payload: FullNotificationPayload): string {
   if (payload.projectName) return payload.projectName;
   if (payload.projectPath) return basename(payload.projectPath);
   return "unknown";
+}
+
+function buildTmuxTailBlock(payload: FullNotificationPayload): string {
+  if (!payload.tmuxTail) return "";
+  const cleaned = parseTmuxTail(payload.tmuxTail);
+  if (!cleaned) return "";
+  return `\n**Recent output:**\n\`\`\`\n${cleaned}\n\`\`\``;
 }
 
 function buildFooter(payload: FullNotificationPayload, markdown: boolean): string {
@@ -83,6 +119,9 @@ export function formatSessionStop(payload: FullNotificationPayload): string {
     lines.push(`**Incomplete tasks:** ${payload.incompleteTasks}`);
   }
 
+  const tail = buildTmuxTailBlock(payload);
+  if (tail) lines.push(tail);
+
   lines.push("");
   lines.push(buildFooter(payload, true));
 
@@ -114,6 +153,9 @@ export function formatSessionEnd(payload: FullNotificationPayload): string {
     lines.push("", `**Summary:** ${payload.contextSummary}`);
   }
 
+  const tail = buildTmuxTailBlock(payload);
+  if (tail) lines.push(tail);
+
   lines.push("");
   lines.push(buildFooter(payload, true));
 
@@ -133,6 +175,9 @@ export function formatSessionIdle(payload: FullNotificationPayload): string {
   if (payload.modesUsed && payload.modesUsed.length > 0) {
     lines.push(`**Modes:** ${payload.modesUsed.join(", ")}`);
   }
+
+  const tail = buildTmuxTailBlock(payload);
+  if (tail) lines.push(tail);
 
   lines.push("");
   lines.push(buildFooter(payload, true));

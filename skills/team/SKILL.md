@@ -5,7 +5,7 @@ description: N coordinated agents on shared task list using tmux-based orchestra
 
 # Team Skill
 
-`$team` is the tmux-based parallel execution mode for OMX. It starts real worker Codex sessions in split panes and coordinates them through `.omx/state/team/...` files plus MCP team tools.
+`$team` is the tmux-based parallel execution mode for OMX. It starts real worker Codex and/or Claude CLI sessions in split panes and coordinates them through `.omx/state/team/...` files plus MCP team tools.
 
 This skill is operationally sensitive. Treat it as an operator workflow, not a generic prompt pattern.
 
@@ -33,6 +33,23 @@ Examples:
 omx team 3:executor "analyze feature X and report flaws"
 omx team "debug flaky integration tests"
 omx team ralph "ship end-to-end fix with verification"
+```
+
+### Claude teammates (v0.6.0+)
+
+Important: `N:agent-type` (for example `2:executor`) selects the **worker role prompt**, not the worker CLI (`codex` vs `claude`).
+
+To launch Claude teammates, use the team worker CLI env vars:
+
+```bash
+# Force all teammates to Claude CLI
+OMX_TEAM_WORKER_CLI=claude omx team 2:executor "update docs and report"
+
+# Mixed team (worker 1 = Codex, worker 2 = Claude)
+OMX_TEAM_WORKER_CLI_MAP=codex,claude omx team 2:executor "split doc/code tasks"
+
+# Auto mode: Claude is selected when worker launch args/model contains 'claude'
+OMX_TEAM_WORKER_CLI=auto OMX_TEAM_WORKER_LAUNCH_ARGS="--model claude-..." omx team 2:executor "run mixed validation"
 ```
 
 ## Preconditions
@@ -66,8 +83,14 @@ If duplicates exist, remove extras before `omx team` to prevent HUD ending up in
 4. Compose team-scoped worker instructions file at:
    - `.omx/state/team/<team>/worker-agents.md`
    - Uses project `AGENTS.md` content (if present) + worker overlay, without mutating project `AGENTS.md`
-5. Split current tmux window into worker panes
-6. Launch workers with `OMX_TEAM_WORKER=<team>/worker-<n>`
+5. Resolve canonical shared state root from leader cwd (`<leader-cwd>/.omx/state`)
+6. Split current tmux window into worker panes
+7. Launch workers with:
+   - `OMX_TEAM_WORKER=<team>/worker-<n>`
+   - `OMX_TEAM_STATE_ROOT=<leader-cwd>/.omx/state`
+   - `OMX_TEAM_LEADER_CWD=<leader-cwd>`
+   - worker CLI selected by `OMX_TEAM_WORKER_CLI` / `OMX_TEAM_WORKER_CLI_MAP` (`codex` or `claude`)
+   - optional worktree metadata envs when `--worktree` is used
 7. Wait for worker readiness (`capture-pane` polling)
 8. Write per-worker `inbox.md` and trigger via `tmux send-keys`
 9. Return control to leader; follow-up uses `status` / `resume` / `shutdown`
@@ -75,24 +98,40 @@ If duplicates exist, remove extras before `omx team` to prevent HUD ending up in
 Important:
 
 - Leader remains in existing pane
-- Worker panes are independent full Codex sessions
+- Worker panes are independent full Codex/Claude CLI sessions
+- Workers may run in separate git worktrees (`omx team --worktree[=<name>]`) while sharing one team state root
 - Worker ACKs go to `mailbox/leader-fixed.json`
 - Notify hook updates worker heartbeat and nudges leader during active team mode
+- Submit routing uses this CLI resolution order per worker trigger:
+  1) explicit worker CLI provided by runtime state (persisted on worker identity/config),
+  2) `OMX_TEAM_WORKER_CLI_MAP` entry for that worker index,
+  3) fallback `OMX_TEAM_WORKER_CLI` / auto detection.
+- Mixed CLI-map teams are supported for both startup and trigger submit behavior.
+- Trigger submit differs by CLI:
+  - Codex may use queue-first `Tab` on busy panes (strategy-dependent).
+  - Claude always uses direct Enter-only (`C-m`) rounds (never queue-first `Tab`).
 
-### Team worker model resolution (current contract)
+### Team worker model + thinking resolution (current contract)
 
-Team mode resolves worker model flags from one shared launch-arg set (not per-worker model selection).
+Team mode resolves worker **model flags** from one shared launch-arg set (not per-worker model selection).
 
-Precedence (highest to lowest):
+Model precedence (highest to lowest):
 1. Explicit worker model in `OMX_TEAM_WORKER_LAUNCH_ARGS`
 2. Inherited leader `--model` flag
 3. Injected low-complexity default: `gpt-5.3-codex-spark` (only when 1+2 are absent and team `agentType` is low-complexity)
+
+Thinking-level rule (critical):
+- **No model-name heuristic mapping.**
+- Team runtime must **not** infer `model_reasoning_effort` from model strings (e.g., `spark`, `opus`, `mini`).
+- Worker thinking level is applied **only when explicitly provided** (leader/user launch args or explicit config).
+- If no explicit thinking value is provided, runtime leaves `model_reasoning_effort` unset.
 
 Normalization requirements:
 - Parse both `--model <value>` and `--model=<value>`
 - Remove duplicate/conflicting model flags
 - Emit exactly one final canonical flag: `--model <value>`
 - Preserve unrelated args in worker launch config
+- If explicit reasoning exists, preserve canonical `-c model_reasoning_effort="<level>"`; otherwise do not inject one
 
 ## Required Lifecycle (Operator Contract)
 
@@ -177,7 +216,20 @@ Useful runtime env vars:
 - `OMX_TEAM_AUTO_TRUST=0`
   - Disable auto-advance for trust prompt (default behavior auto-advances)
 - `OMX_TEAM_WORKER_LAUNCH_ARGS`
-  - Extra args passed to worker `codex` launch
+  - Extra args passed to worker launch command
+- `OMX_TEAM_WORKER_CLI`
+  - Worker CLI selector: `auto|codex|claude` (default: `auto`)
+  - `auto` chooses `claude` when worker `--model` contains `claude`, otherwise `codex`
+  - In `claude` mode, workers launch with exactly one `--dangerously-skip-permissions`
+    and ignore explicit model/config/effort launch overrides (uses default `settings.json`)
+- `OMX_TEAM_WORKER_CLI_MAP`
+  - Per-worker CLI selector (comma-separated `auto|codex|claude`)
+  - Length must be `1` (broadcast) or exactly the team worker count
+  - Example: `OMX_TEAM_WORKER_CLI_MAP=codex,codex,claude,claude`
+  - When present, overrides `OMX_TEAM_WORKER_CLI`
+- `OMX_TEAM_AUTO_INTERRUPT_RETRY`
+  - Trigger submit fallback (default: enabled)
+  - `0` disables adaptive queue->resend escalation
 - `OMX_TEAM_LEADER_NUDGE_MS`
   - Leader nudge interval in ms (default 120000)
 - `OMX_TEAM_STRICT_SUBMIT=1`
@@ -271,6 +323,6 @@ Do not claim clean completion if shutdown occurred with `in_progress>0`.
 
 ## Limitations
 
-- No git worktree isolation; workers share working tree
+- Worktree provisioning requires a git repository and can fail on branch/path collisions
 - send-keys interactions can be timing-sensitive under load
 - stale panes from prior runs can interfere until manually cleaned
