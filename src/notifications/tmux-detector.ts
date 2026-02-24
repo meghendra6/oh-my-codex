@@ -7,6 +7,9 @@
 
 import { execSync, execFileSync, spawnSync } from 'child_process';
 
+const BRACKETED_PASTE_START = '\u001b[200~';
+const BRACKETED_PASTE_END = '\u001b[201~';
+
 export function isTmuxAvailable(): boolean {
   try {
     execSync('which tmux', { stdio: ['pipe', 'pipe', 'pipe'], timeout: 3000 });
@@ -82,8 +85,9 @@ export function analyzePaneContent(content: string): PaneAnalysis {
  * could be interpreted as a key press by tmux when sent without -l (issue #107).
  *
  * @param paneId     tmux pane identifier, e.g. "%3"
- * @param text       text to type; embedded newlines are preserved by sending
- *                   literal chunks separated by explicit non-submit newline keys
+ * @param text       text to type; multiline payloads are wrapped in tmux
+ *                   bracketed-paste escapes so newline semantics are preserved
+ *                   without emitting submit keys between lines
  * @param pressEnter when true, appends two isolated C-m submit calls
  * @returns          array of argv arrays, one per send-keys invocation
  */
@@ -93,27 +97,16 @@ export function buildSendPaneArgvs(
   pressEnter: boolean = true,
 ): string[][] {
   const normalized = text.replace(/\r\n?/g, '\n');
-  const lines = normalized.split('\n');
-  const argvs: string[][] = [];
-
   // Use -l (literal) so tmux key names inside text are never interpreted as
   // key presses. Use -- to prevent text starting with '-' from being parsed
   // as tmux flags.
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.length > 0) {
-      argvs.push(['send-keys', '-t', paneId, '-l', '--', line]);
-    }
-    if (i < lines.length - 1) {
-      // Send non-submit newline between literal chunks to preserve Shift+Enter
-      // style multi-line replies without bundling submit keys with text.
-      argvs.push(['send-keys', '-t', paneId, 'C-j']);
-    }
-  }
-
-  if (argvs.length === 0) {
-    argvs.push(['send-keys', '-t', paneId, '-l', '--', '']);
-  }
+  //
+  // For multiline input, send bracketed paste so applications like Codex CLI
+  // receive embedded newlines as literal text instead of submit key presses.
+  const payload = normalized.includes('\n')
+    ? `${BRACKETED_PASTE_START}${normalized}${BRACKETED_PASTE_END}`
+    : normalized;
+  const argvs: string[][] = [['send-keys', '-t', paneId, '-l', '--', payload]];
 
   if (pressEnter) {
     // Codex CLI uses raw input mode where 'Enter' key name is unreliable;

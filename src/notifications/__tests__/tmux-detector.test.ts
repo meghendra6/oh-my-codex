@@ -140,22 +140,23 @@ describe('buildSendPaneArgvs', () => {
     assert.ok(!argvs[0].includes('C-m'), 'no C-m when pressEnter=false');
   });
 
-  it('preserves multiline input by splitting literal chunks with non-submit newline keys', () => {
+  it('preserves multiline input via a single bracketed-paste literal payload', () => {
     const argvs = buildSendPaneArgvs('%3', 'line1\nline2\r\nline3', false);
-    assert.deepEqual(argvs, [
-      ['send-keys', '-t', '%3', '-l', '--', 'line1'],
-      ['send-keys', '-t', '%3', 'C-j'],
-      ['send-keys', '-t', '%3', '-l', '--', 'line2'],
-      ['send-keys', '-t', '%3', 'C-j'],
-      ['send-keys', '-t', '%3', '-l', '--', 'line3'],
-    ]);
+    assert.equal(argvs.length, 1);
+    assert.deepEqual(argvs[0]?.slice(0, 5), ['send-keys', '-t', '%3', '-l', '--']);
+    const payload = argvs[0]?.[5] ?? '';
+    assert.ok(payload.startsWith('\u001b[200~'));
+    assert.ok(payload.endsWith('\u001b[201~'));
+    assert.ok(payload.includes('line1\nline2\nline3'));
   });
 
-  it('keeps newline keys isolated from submit keys', () => {
+  it('keeps multiline payload and submit keys isolated', () => {
     const argvs = buildSendPaneArgvs('%3', 'line1\nline2', true);
+    const textArgv = argvs[0] ?? [];
     const submitArgvs = argvs.slice(-2);
-    const intermediate = argvs.slice(0, -2);
-    assert.ok(intermediate.some(argv => argv.includes('C-j')), 'expected non-submit newline key between chunks');
+    assert.ok(textArgv.includes('-l'), 'multiline payload must still be literal');
+    assert.ok((textArgv[5] ?? '').startsWith('\u001b[200~'));
+    assert.equal(argvs.some(argv => argv.includes('C-j')), false, 'must not emit newline key submits');
     for (const argv of submitArgvs) {
       assert.deepEqual(argv, ['send-keys', '-t', '%3', 'C-m']);
     }
