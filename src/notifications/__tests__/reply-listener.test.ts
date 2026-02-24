@@ -1,7 +1,25 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { sanitizeReplyInput, isReplyListenerProcess } from '../reply-listener.js';
+
+async function waitForReplyListenerIdentity(pid: number, timeoutMs = 1500): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (isReplyListenerProcess(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return isReplyListenerProcess(pid);
+}
+
+function canInspectProcessArgs(): boolean {
+  if (process.platform === 'linux') return true;
+  const result = spawnSync('ps', ['-p', String(process.pid), '-o', 'args='], {
+    encoding: 'utf-8',
+    timeout: 1000,
+  });
+  return result.status === 0 && !result.error;
+}
 
 describe('sanitizeReplyInput', () => {
   it('passes through normal text', () => {
@@ -75,7 +93,12 @@ describe('isReplyListenerProcess', () => {
     assert.equal(isReplyListenerProcess(process.pid), false);
   });
 
-  it('returns true for a process whose command line contains the daemon marker', (_, done) => {
+  it('returns true for a process whose command line contains the daemon marker', async (t) => {
+    if (!canInspectProcessArgs()) {
+      t.skip('process argv inspection is unavailable in this environment');
+      return;
+    }
+
     // Spawn a long-lived node process whose -e script contains 'pollLoop',
     // matching what startReplyListener injects into the daemon script.
     const child = spawn(
@@ -83,16 +106,18 @@ describe('isReplyListenerProcess', () => {
       ['-e', 'const pollLoop = () => {}; setInterval(pollLoop, 60000);'],
       { stdio: 'ignore' },
     );
-    child.once('spawn', () => {
-      const pid = child.pid!;
-      const result = isReplyListenerProcess(pid);
-      child.kill();
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', () => resolve());
+      child.once('error', (err) => reject(err));
+    });
+
+    const pid = child.pid!;
+    try {
+      const result = await waitForReplyListenerIdentity(pid);
       assert.equal(result, true);
-      done();
-    });
-    child.once('error', (err) => {
-      done(err);
-    });
+    } finally {
+      child.kill();
+    }
   });
 
   it('returns false for a process whose command line lacks the daemon marker', (_, done) => {
