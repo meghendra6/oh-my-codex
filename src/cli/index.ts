@@ -31,9 +31,23 @@ import {
 import {
   readSessionState, isSessionStale, writeSessionStart, writeSessionEnd, resetSessionMetrics,
 } from '../hooks/session.js';
-import { enableMouseScrolling, isNativeWindows, isWsl2 } from '../team/tmux-session.js';
+import {
+  buildClientAttachedReconcileHookName,
+  buildReconcileHudResizeArgs,
+  buildRegisterClientAttachedReconcileArgs,
+  buildRegisterResizeHookArgs,
+  buildResizeHookName,
+  buildResizeHookTarget,
+  buildScheduleDelayedHudResizeArgs,
+  buildUnregisterClientAttachedReconcileArgs,
+  buildUnregisterResizeHookArgs,
+  enableMouseScrolling,
+  isNativeWindows,
+  isWsl2,
+} from '../team/tmux-session.js';
 import { getPackageRoot } from '../utils/package.js';
 import { codexConfigPath } from '../utils/paths.js';
+import { HUD_TMUX_HEIGHT_LINES } from '../hud/constants.js';
 import { buildHookEvent } from '../hooks/extensibility/events.js';
 import { dispatchHookEvent } from '../hooks/extensibility/dispatcher.js';
 import {
@@ -184,6 +198,11 @@ interface TmuxPaneSnapshot {
   paneId: string;
   currentCommand: string;
   startCommand: string;
+}
+
+export interface DetachedSessionTmuxStep {
+  name: string;
+  args: string[];
 }
 
 export function parseTmuxPaneSnapshot(output: string): TmuxPaneSnapshot[] {
@@ -663,6 +682,116 @@ export function buildTmuxSessionName(cwd: string, sessionId: string): string {
   return name.length > 120 ? name.slice(0, 120) : name;
 }
 
+function parsePaneIdFromTmuxOutput(rawOutput: string): string | null {
+  const paneId = rawOutput.split('\n')[0]?.trim() || '';
+  return paneId.startsWith('%') ? paneId : null;
+}
+
+function parseWindowIndexFromTmuxOutput(rawOutput: string): string | null {
+  const windowIndex = rawOutput.split('\n')[0]?.trim() || '';
+  return /^[0-9]+$/.test(windowIndex) ? windowIndex : null;
+}
+
+function detectDetachedSessionWindowIndex(sessionName: string): string | null {
+  try {
+    const output = execFileSync(
+      'tmux',
+      ['display-message', '-p', '-t', sessionName, '#{window_index}'],
+      { encoding: 'utf-8' },
+    );
+    return parseWindowIndexFromTmuxOutput(output);
+  } catch {
+    return null;
+  }
+}
+
+export function buildDetachedSessionBootstrapSteps(
+  sessionName: string,
+  cwd: string,
+  codexCmd: string,
+  hudCmd: string,
+  workerLaunchArgs: string | null,
+  codexHomeOverride?: string,
+): DetachedSessionTmuxStep[] {
+  const newSessionArgs: string[] = [
+    'new-session', '-d', '-s', sessionName, '-c', cwd,
+    ...(workerLaunchArgs ? ['-e', `${TEAM_WORKER_LAUNCH_ARGS_ENV}=${workerLaunchArgs}`] : []),
+    ...(codexHomeOverride ? ['-e', `CODEX_HOME=${codexHomeOverride}`] : []),
+    codexCmd,
+  ];
+  const splitCaptureArgs: string[] = [
+    'split-window', '-v', '-l', String(HUD_TMUX_HEIGHT_LINES), '-d', '-t', sessionName,
+    '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd,
+  ];
+  return [
+    { name: 'new-session', args: newSessionArgs },
+    { name: 'split-and-capture-hud-pane', args: splitCaptureArgs },
+  ];
+}
+
+export function buildDetachedSessionFinalizeSteps(
+  sessionName: string,
+  hudPaneId: string | null,
+  hookWindowIndex: string | null,
+  enableMouse: boolean,
+  wsl2: boolean,
+): DetachedSessionTmuxStep[] {
+  const steps: DetachedSessionTmuxStep[] = [];
+  if (hudPaneId && hookWindowIndex) {
+    const hookTarget = buildResizeHookTarget(sessionName, hookWindowIndex);
+    const hookName = buildResizeHookName('launch', sessionName, hookWindowIndex, hudPaneId);
+    const clientAttachedHookName = buildClientAttachedReconcileHookName('launch', sessionName, hookWindowIndex, hudPaneId);
+    steps.push({
+      name: 'register-resize-hook',
+      args: buildRegisterResizeHookArgs(hookTarget, hookName, hudPaneId),
+    });
+    steps.push({
+      name: 'register-client-attached-reconcile',
+      args: buildRegisterClientAttachedReconcileArgs(hookTarget, clientAttachedHookName, hudPaneId),
+    });
+    steps.push({
+      name: 'schedule-delayed-resize',
+      args: buildScheduleDelayedHudResizeArgs(hudPaneId),
+    });
+    steps.push({
+      name: 'reconcile-hud-resize',
+      args: buildReconcileHudResizeArgs(hudPaneId),
+    });
+  }
+
+  if (enableMouse) {
+    steps.push({ name: 'set-mouse', args: ['set-option', '-t', sessionName, 'mouse', 'on'] });
+    if (wsl2) {
+      steps.push({ name: 'set-wsl-xt', args: ['set-option', '-ga', 'terminal-overrides', ',xterm*:XT'] });
+    }
+  }
+  steps.push({ name: 'attach-session', args: ['attach-session', '-t', sessionName] });
+  return steps;
+}
+
+export function buildDetachedSessionRollbackSteps(
+  sessionName: string,
+  hookTarget: string | null,
+  hookName: string | null,
+  clientAttachedHookName: string | null,
+): DetachedSessionTmuxStep[] {
+  const steps: DetachedSessionTmuxStep[] = [];
+  if (hookTarget && clientAttachedHookName) {
+    steps.push({
+      name: 'unregister-client-attached-reconcile',
+      args: buildUnregisterClientAttachedReconcileArgs(hookTarget, clientAttachedHookName),
+    });
+  }
+  if (hookTarget && hookName) {
+    steps.push({
+      name: 'unregister-resize-hook',
+      args: buildUnregisterResizeHookArgs(hookTarget, hookName),
+    });
+  }
+  steps.push({ name: 'kill-session', args: ['kill-session', '-t', sessionName] });
+  return steps;
+}
+
 /**
  * preLaunch: Prepare environment before Codex starts.
  * 1. Orphan cleanup (stale session from a crashed launch)
@@ -800,29 +929,77 @@ function runCodex(cwd: string, args: string[], sessionId: string, workerDefaultM
     const codexCmd = buildTmuxShellCommand('codex', launchArgs);
     const tmuxSessionId = `omx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const sessionName = buildTmuxSessionName(cwd, tmuxSessionId);
+    let createdDetachedSession = false;
+    let registeredHookTarget: string | null = null;
+    let registeredHookName: string | null = null;
+    let registeredClientAttachedHookName: string | null = null;
     try {
-      execFileSync(
-        'tmux',
-        [
-          'new-session', '-d', '-s', sessionName, '-c', cwd,
-          ...(workerLaunchArgs ? ['-e', `${TEAM_WORKER_LAUNCH_ARGS_ENV}=${workerLaunchArgs}`] : []),
-          ...(codexHomeOverride ? ['-e', `CODEX_HOME=${codexHomeOverride}`] : []),
-          codexCmd,
-          ';',
-          'split-window', '-v', '-l', '4', '-d', '-c', cwd, hudCmd,
-          // Enable mouse scrolling at session start (closes #128)
-          ...(process.env.OMX_MOUSE !== '0' ? [
-            ';', 'set-option', '-t', sessionName, 'mouse', 'on',
-            ...(isWsl2() ? [';', 'set-option', '-ga', 'terminal-overrides', ',xterm*:XT'] : []),
-          ] : []),
-          ';',
-          'select-pane', '-t', '0',
-          ';',
-          'attach-session', '-t', sessionName,
-        ],
-        { stdio: 'inherit' }
+      const bootstrapSteps = buildDetachedSessionBootstrapSteps(
+        sessionName,
+        cwd,
+        codexCmd,
+        hudCmd,
+        workerLaunchArgs,
+        codexHomeOverride,
       );
+      for (const step of bootstrapSteps) {
+        const output = execFileSync('tmux', step.args, { stdio: step.name === 'new-session' ? 'ignore' : 'pipe', encoding: 'utf-8' });
+        if (step.name === 'new-session') {
+          createdDetachedSession = true;
+        }
+        if (step.name === 'split-and-capture-hud-pane') {
+          const hudPaneId = parsePaneIdFromTmuxOutput(output || '');
+          const hookWindowIndex = hudPaneId ? detectDetachedSessionWindowIndex(sessionName) : null;
+          const hookTarget = hudPaneId && hookWindowIndex
+            ? buildResizeHookTarget(sessionName, hookWindowIndex)
+            : null;
+          const hookName = hudPaneId && hookWindowIndex
+            ? buildResizeHookName('launch', sessionName, hookWindowIndex, hudPaneId)
+            : null;
+          const clientAttachedHookName = hudPaneId && hookWindowIndex
+            ? buildClientAttachedReconcileHookName('launch', sessionName, hookWindowIndex, hudPaneId)
+            : null;
+          const finalizeSteps = buildDetachedSessionFinalizeSteps(
+            sessionName,
+            hudPaneId,
+            hookWindowIndex,
+            process.env.OMX_MOUSE !== '0',
+            isWsl2(),
+          );
+          for (const finalizeStep of finalizeSteps) {
+            const stdio = finalizeStep.name === 'attach-session' ? 'inherit' : 'ignore';
+            try {
+              execFileSync('tmux', finalizeStep.args, { stdio });
+            } catch {
+              if (finalizeStep.name === 'attach-session') throw new Error('failed to attach detached tmux session');
+              continue;
+            }
+            if (finalizeStep.name === 'register-resize-hook' && hookTarget && hookName) {
+              registeredHookTarget = hookTarget;
+              registeredHookName = hookName;
+            }
+            if (finalizeStep.name === 'register-client-attached-reconcile' && clientAttachedHookName) {
+              registeredClientAttachedHookName = clientAttachedHookName;
+            }
+          }
+        }
+      }
     } catch {
+      if (createdDetachedSession) {
+        const rollbackSteps = buildDetachedSessionRollbackSteps(
+          sessionName,
+          registeredHookTarget,
+          registeredHookName,
+          registeredClientAttachedHookName,
+        );
+        for (const rollbackStep of rollbackSteps) {
+          try {
+            execFileSync('tmux', rollbackStep.args, { stdio: 'ignore' });
+          } catch {
+            // best-effort rollback only
+          }
+        }
+      }
       // tmux not available or failed, just run codex directly
       try {
         execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
@@ -849,11 +1026,10 @@ function listHudWatchPaneIdsInCurrentWindow(currentPaneId?: string): string[] {
 function createHudWatchPane(cwd: string, hudCmd: string): string | null {
   const output = execFileSync(
     'tmux',
-    ['split-window', '-v', '-l', '4', '-d', '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd],
+    ['split-window', '-v', '-l', String(HUD_TMUX_HEIGHT_LINES), '-d', '-c', cwd, '-P', '-F', '#{pane_id}', hudCmd],
     { encoding: 'utf-8' }
   );
-  const paneId = output.split('\n')[0]?.trim() || '';
-  return paneId.startsWith('%') ? paneId : null;
+  return parsePaneIdFromTmuxOutput(output);
 }
 
 function killTmuxPane(paneId: string): void {

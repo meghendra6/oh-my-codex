@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-02-24
+
+### Added
+- Client-attached HUD reconcile hook for detached-launch initial pane layout reconciliation.
+
+### Fixed
+- Hardened detached session resize hook flow to prevent race conditions when tmux windows drift.
+- Hardened HUD/team resize reconciliation for consistent pane organization across attach/detach cycles.
+- Reduced HUD delayed reconcile fallback from 10s to 2s for faster layout correction.
+- Client-attached hook is now tracked and properly unregistered during rollback.
+
+### Tests
+- Added tmux session and CLI sequencing tests for resize/reconcile paths.
+
 ## [0.6.2] - 2026-02-24
 
 ### Fixed
