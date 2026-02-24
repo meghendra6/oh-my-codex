@@ -962,7 +962,7 @@ describe('buildExtendedKeysSetupCommands', () => {
   it('includes extended-keys and extkeys terminal feature setup', () => {
     const commands = buildExtendedKeysSetupCommands(false);
     assert.deepEqual(commands, [
-      ['set-option', '-s', 'extended-keys', 'on'],
+      ['set-option', '-s', 'extended-keys', 'always'],
       ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
     ]);
   });
@@ -970,7 +970,7 @@ describe('buildExtendedKeysSetupCommands', () => {
   it('appends WSL XT override when wsl2=true', () => {
     const commands = buildExtendedKeysSetupCommands(true);
     assert.deepEqual(commands, [
-      ['set-option', '-s', 'extended-keys', 'on'],
+      ['set-option', '-s', 'extended-keys', 'always'],
       ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
       ['set-option', '-ga', 'terminal-overrides', ',xterm*:XT'],
     ]);

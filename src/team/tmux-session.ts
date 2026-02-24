@@ -714,8 +714,9 @@ export function buildScrollCopyBindings(): Array<string[]> {
  */
 export function buildExtendedKeysSetupCommands(wsl2: boolean): Array<string[]> {
   const commands: Array<string[]> = [
-    // Enable modified-key forwarding when supported by terminal + tmux.
-    ['set-option', '-s', 'extended-keys', 'on'],
+    // Force modified-key forwarding even when applications do not explicitly
+    // opt in, so Shift+Enter-style keys can still reach terminal UIs.
+    ['set-option', '-s', 'extended-keys', 'always'],
     // Advertise extkeys support for xterm-compatible terminals.
     ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
   ];
