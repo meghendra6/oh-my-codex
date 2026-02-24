@@ -963,7 +963,7 @@ describe('buildExtendedKeysSetupCommands', () => {
     const commands = buildExtendedKeysSetupCommands(false);
     assert.deepEqual(commands, [
       ['set-option', '-s', 'extended-keys', 'always'],
-      ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
+      ['set-option', '-sa', 'terminal-features', ',*:extkeys'],
     ]);
   });
 
@@ -971,7 +971,7 @@ describe('buildExtendedKeysSetupCommands', () => {
     const commands = buildExtendedKeysSetupCommands(true);
     assert.deepEqual(commands, [
       ['set-option', '-s', 'extended-keys', 'always'],
-      ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
+      ['set-option', '-sa', 'terminal-features', ',*:extkeys'],
       ['set-option', '-ga', 'terminal-overrides', ',xterm*:XT'],
     ]);
   });

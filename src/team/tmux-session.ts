@@ -717,8 +717,9 @@ export function buildExtendedKeysSetupCommands(wsl2: boolean): Array<string[]> {
     // Force modified-key forwarding even when applications do not explicitly
     // opt in, so Shift+Enter-style keys can still reach terminal UIs.
     ['set-option', '-s', 'extended-keys', 'always'],
-    // Advertise extkeys support for xterm-compatible terminals.
-    ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
+    // Advertise extkeys support broadly so non-xterm terminals (and nested
+    // tmux clients) still forward Shift+Enter correctly.
+    ['set-option', '-sa', 'terminal-features', ',*:extkeys'],
   ];
   if (wsl2) {
     // Preserve existing WSL2 XT override behavior.
