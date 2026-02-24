@@ -354,6 +354,17 @@ describe('detached tmux new-session sequencing', () => {
     assert.equal(attachIndex > scheduleIndex, true);
     assert.equal(names.includes('register-resize-hook'), true);
     assert.equal(names.includes('reconcile-hud-resize'), true);
+    assert.equal(names.includes('set-extended-keys'), true);
+    assert.equal(names.includes('set-extkeys-feature'), true);
+    assert.equal(names.includes('set-wsl-xt'), false);
+  });
+
+  it('buildDetachedSessionFinalizeSteps includes WSL XT override when wsl2=true', () => {
+    const steps = buildDetachedSessionFinalizeSteps('omx-demo', '%12', '3', true, true);
+    const names = steps.map((step) => step.name);
+    assert.equal(names.includes('set-extended-keys'), true);
+    assert.equal(names.includes('set-extkeys-feature'), true);
+    assert.equal(names.includes('set-wsl-xt'), true);
   });
 
   it('buildDetachedSessionRollbackSteps unregisters hooks before killing session', () => {

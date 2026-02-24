@@ -709,9 +709,29 @@ export function buildScrollCopyBindings(): Array<string[]> {
 }
 
 /**
+ * Build tmux commands required to preserve modified key semantics inside tmux
+ * (notably Shift+Enter via extkeys-capable terminals).
+ */
+export function buildExtendedKeysSetupCommands(wsl2: boolean): Array<string[]> {
+  const commands: Array<string[]> = [
+    // Enable modified-key forwarding when supported by terminal + tmux.
+    ['set-option', '-s', 'extended-keys', 'on'],
+    // Advertise extkeys support for xterm-compatible terminals.
+    ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
+  ];
+  if (wsl2) {
+    // Preserve existing WSL2 XT override behavior.
+    commands.push(['set-option', '-ga', 'terminal-overrides', ',xterm*:XT']);
+  }
+  return commands;
+}
+
+/**
  * Enable tmux mouse mode for a session so users can scroll pane content
  * (e.g. long agent output) with the mouse wheel instead of arrow keys.
  * Arrow keys remain reserved for Codex CLI input-history navigation.
+ * Also enables tmux extended-keys forwarding so modified keys (e.g.
+ * Shift+Enter on extkeys-capable terminals) are preserved.
  *
  * Also configures viewport scrolling via copy-mode on wheel-up and clipboard
  * copy on mouse selection, fixing scroll and copy issues in --xhigh and
@@ -737,12 +757,8 @@ export function enableMouseScrolling(sessionTarget: string): boolean {
   for (const binding of buildScrollCopyBindings()) {
     runTmux(binding);
   }
-
-  if (isWsl2()) {
-    // Append the XT capability override globally (terminal-overrides is a
-    // global-only option). -ga appends rather than replacing, preserving any
-    // overrides the user may already have configured.
-    runTmux(['set-option', '-ga', 'terminal-overrides', ',xterm*:XT']);
+  for (const command of buildExtendedKeysSetupCommands(isWsl2())) {
+    runTmux(command);
   }
 
   return true;

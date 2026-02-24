@@ -33,6 +33,7 @@ import {
 } from '../hooks/session.js';
 import {
   buildClientAttachedReconcileHookName,
+  buildExtendedKeysSetupCommands,
   buildReconcileHudResizeArgs,
   buildRegisterClientAttachedReconcileArgs,
   buildRegisterResizeHookArgs,
@@ -761,8 +762,15 @@ export function buildDetachedSessionFinalizeSteps(
 
   if (enableMouse) {
     steps.push({ name: 'set-mouse', args: ['set-option', '-t', sessionName, 'mouse', 'on'] });
-    if (wsl2) {
-      steps.push({ name: 'set-wsl-xt', args: ['set-option', '-ga', 'terminal-overrides', ',xterm*:XT'] });
+    const extkeySetup = buildExtendedKeysSetupCommands(wsl2);
+    if (extkeySetup[0]) {
+      steps.push({ name: 'set-extended-keys', args: extkeySetup[0] });
+    }
+    if (extkeySetup[1]) {
+      steps.push({ name: 'set-extkeys-feature', args: extkeySetup[1] });
+    }
+    if (extkeySetup[2]) {
+      steps.push({ name: 'set-wsl-xt', args: extkeySetup[2] });
     }
   }
   steps.push({ name: 'attach-session', args: ['attach-session', '-t', sessionName] });

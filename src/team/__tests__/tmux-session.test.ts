@@ -8,6 +8,7 @@ import {
   buildRegisterResizeHookArgs,
   buildResizeHookName,
   buildResizeHookTarget,
+  buildExtendedKeysSetupCommands,
   buildScheduleDelayedHudResizeArgs,
   buildUnregisterClientAttachedReconcileArgs,
   buildUnregisterResizeHookArgs,
@@ -954,6 +955,25 @@ describe('buildScrollCopyBindings (issue #206)', () => {
     const tIdx = dragEnd.indexOf('-T');
     assert.ok(tIdx !== -1, 'drag-end binding must specify a key table with -T');
     assert.equal(dragEnd[tIdx + 1], 'copy-mode', 'drag-end binding must be in copy-mode table');
+  });
+});
+
+describe('buildExtendedKeysSetupCommands', () => {
+  it('includes extended-keys and extkeys terminal feature setup', () => {
+    const commands = buildExtendedKeysSetupCommands(false);
+    assert.deepEqual(commands, [
+      ['set-option', '-s', 'extended-keys', 'on'],
+      ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
+    ]);
+  });
+
+  it('appends WSL XT override when wsl2=true', () => {
+    const commands = buildExtendedKeysSetupCommands(true);
+    assert.deepEqual(commands, [
+      ['set-option', '-s', 'extended-keys', 'on'],
+      ['set-option', '-sa', 'terminal-features', ',xterm*:extkeys'],
+      ['set-option', '-ga', 'terminal-overrides', ',xterm*:XT'],
+    ]);
   });
 });
 
