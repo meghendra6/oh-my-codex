@@ -304,6 +304,32 @@ describe('buildWorkerStartupCommand', () => {
     }
   });
 
+  it('applies claude skip-permissions when worker CLI is provided by plan override', () => {
+    const prevShell = process.env.SHELL;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.SHELL = '/bin/bash';
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const cmd = buildWorkerStartupCommand(
+        'alpha',
+        1,
+        ['--model', 'gpt-5', '--dangerously-bypass-approvals-and-sandbox'],
+        process.cwd(),
+        {},
+        'claude',
+      );
+      assert.match(cmd, /exec claude/);
+      assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
+      assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
+      assert.doesNotMatch(cmd, /--model/);
+    } finally {
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
   it('drops all explicit launch args for claude workers', () => {
     const prevShell = process.env.SHELL;
     const prevCli = process.env.OMX_TEAM_WORKER_CLI;
