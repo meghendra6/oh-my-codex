@@ -15,7 +15,6 @@ export interface TeamSession {
 
 const INJECTION_MARKER = '[OMX_TMUX_INJECT]';
 const CODEX_BYPASS_FLAG = '--dangerously-bypass-approvals-and-sandbox';
-const CLAUDE_BYPASS_FLAG = '--dangerously-skip-permissions';
 const MADMAX_FLAG = '--madmax';
 const CONFIG_FLAG = '-c';
 const LONG_CONFIG_FLAG = '--config';
@@ -251,48 +250,11 @@ export function resolveTeamWorkerCliPlan(
 export function translateWorkerLaunchArgsForCli(workerCli: TeamWorkerCli, args: string[]): string[] {
   if (workerCli === 'codex') return [...args];
 
-  // Claude teammates should use default settings.json behavior.
-  // Intentionally drop model/config/effort overrides and force skip-permissions.
-  const translated: string[] = [CLAUDE_BYPASS_FLAG];
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-
-    if (arg === CODEX_BYPASS_FLAG || arg === MADMAX_FLAG) {
-      continue;
-    }
-    if (arg === CLAUDE_BYPASS_FLAG) {
-      continue;
-    }
-
-    if (arg === MODEL_FLAG) {
-      const maybeValue = args[i + 1];
-      if (typeof maybeValue === 'string') i += 1;
-      continue;
-    }
-    if (arg.startsWith(`${MODEL_FLAG}=`)) continue;
-
-    if (arg === '--effort') {
-      const maybeValue = args[i + 1];
-      if (typeof maybeValue === 'string') i += 1;
-      continue;
-    }
-    if (arg.startsWith('--effort=')) continue;
-
-    if (arg === CONFIG_FLAG || arg === LONG_CONFIG_FLAG) {
-      const maybeValue = args[i + 1];
-      if (typeof maybeValue === 'string') {
-        i += 1;
-      }
-      continue;
-    }
-    if (arg.startsWith(`${LONG_CONFIG_FLAG}=`)) continue;
-
-    // Drop all remaining explicit launch args in claude mode to preserve
-    // default claude settings.json behavior.
-  }
-
-  return translated;
+  // Claude workers must launch as plain `claude` with no extra args.
+  // This preserves Claude defaults from settings.json and avoids passing
+  // Codex-only flags, model overrides, or config/reasoning overrides.
+  void args;
+  return [];
 }
 
 function commandExists(binary: string): boolean {
