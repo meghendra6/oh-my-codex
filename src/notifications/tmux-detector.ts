@@ -82,8 +82,8 @@ export function analyzePaneContent(content: string): PaneAnalysis {
  * could be interpreted as a key press by tmux when sent without -l (issue #107).
  *
  * @param paneId     tmux pane identifier, e.g. "%3"
- * @param text       text to type; embedded newlines are replaced with spaces
- *                   to prevent them from acting as Enter when sent literally
+ * @param text       text to type; embedded newlines are preserved by sending
+ *                   literal chunks separated by explicit non-submit newline keys
  * @param pressEnter when true, appends two isolated C-m submit calls
  * @returns          array of argv arrays, one per send-keys invocation
  */
@@ -92,14 +92,28 @@ export function buildSendPaneArgvs(
   text: string,
   pressEnter: boolean = true,
 ): string[][] {
-  // Replace newlines with spaces so they cannot act as Enter when the text
-  // is delivered byte-for-byte via -l (literal) mode.
-  const safe = text.replace(/\r?\n/g, ' ');
+  const normalized = text.replace(/\r\n?/g, '\n');
+  const lines = normalized.split('\n');
+  const argvs: string[][] = [];
 
-  // Use -l (literal) so tmux key names inside the text are never interpreted
-  // as key presses. Use -- to prevent text starting with '-' from being
-  // parsed as tmux flags.
-  const argvs: string[][] = [['send-keys', '-t', paneId, '-l', '--', safe]];
+  // Use -l (literal) so tmux key names inside text are never interpreted as
+  // key presses. Use -- to prevent text starting with '-' from being parsed
+  // as tmux flags.
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length > 0) {
+      argvs.push(['send-keys', '-t', paneId, '-l', '--', line]);
+    }
+    if (i < lines.length - 1) {
+      // Send non-submit newline between literal chunks to preserve Shift+Enter
+      // style multi-line replies without bundling submit keys with text.
+      argvs.push(['send-keys', '-t', paneId, 'C-j']);
+    }
+  }
+
+  if (argvs.length === 0) {
+    argvs.push(['send-keys', '-t', paneId, '-l', '--', '']);
+  }
 
   if (pressEnter) {
     // Codex CLI uses raw input mode where 'Enter' key name is unreliable;
