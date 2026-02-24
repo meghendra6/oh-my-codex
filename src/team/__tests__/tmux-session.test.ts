@@ -155,7 +155,7 @@ describe('buildWorkerStartupCommand', () => {
     try {
       const cmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'claude-3-7-sonnet']);
       assert.match(cmd, /exec claude/);
-      assert.match(cmd, /--dangerously-skip-permissions/);
+      assert.doesNotMatch(cmd, /--dangerously-skip-permissions/);
       assert.doesNotMatch(cmd, /--model/);
       assert.doesNotMatch(cmd, /model_instructions_file=/);
     } finally {
@@ -182,7 +182,7 @@ describe('buildWorkerStartupCommand', () => {
       process.env.OMX_TEAM_WORKER_CLI = 'claude';
       const claudeCmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'gpt-5']);
       assert.match(claudeCmd, /exec claude/);
-      assert.match(claudeCmd, /--dangerously-skip-permissions/);
+      assert.doesNotMatch(claudeCmd, /--dangerously-skip-permissions/);
       assert.doesNotMatch(claudeCmd, /--model/);
     } finally {
       if (typeof prevShell === 'string') process.env.SHELL = prevShell;
@@ -194,7 +194,7 @@ describe('buildWorkerStartupCommand', () => {
     }
   });
 
-  it('translates codex-only flags for claude workers', () => {
+  it('drops all explicit launch args for claude workers', () => {
     const prevShell = process.env.SHELL;
     const prevCli = process.env.OMX_TEAM_WORKER_CLI;
     const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
@@ -208,7 +208,7 @@ describe('buildWorkerStartupCommand', () => {
         '--model', 'claude-3-7-sonnet',
       ]);
       assert.match(cmd, /exec claude/);
-      assert.match(cmd, /--dangerously-skip-permissions/);
+      assert.doesNotMatch(cmd, /--dangerously-skip-permissions/);
       assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
       assert.doesNotMatch(cmd, /model_instructions_file=/);
       assert.doesNotMatch(cmd, /--model/);
@@ -223,7 +223,7 @@ describe('buildWorkerStartupCommand', () => {
     }
   });
 
-  it('maps --madmax to claude skip-permissions in claude mode', () => {
+  it('does not pass bypass flags in claude mode', () => {
     const prevArgv = process.argv;
     const prevShell = process.env.SHELL;
     const prevCli = process.env.OMX_TEAM_WORKER_CLI;
@@ -234,8 +234,8 @@ describe('buildWorkerStartupCommand', () => {
     process.argv = [...prevArgv, '--madmax'];
     try {
       const cmd = buildWorkerStartupCommand('alpha', 1);
-      const matches = cmd.match(/--dangerously-skip-permissions/g) || [];
-      assert.equal(matches.length, 1);
+      assert.match(cmd, /exec claude/);
+      assert.doesNotMatch(cmd, /--dangerously-skip-permissions/);
       assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
     } finally {
       process.argv = prevArgv;
@@ -445,10 +445,10 @@ describe('team worker CLI helpers', () => {
     assert.deepEqual(translateWorkerLaunchArgsForCli('codex', args), args);
   });
 
-  it('translateWorkerLaunchArgsForCli maps reasoning override for claude', () => {
+  it('translateWorkerLaunchArgsForCli returns empty args for claude', () => {
     assert.deepEqual(
       translateWorkerLaunchArgsForCli('claude', ['-c', 'model_reasoning_effort="xhigh"', '--model', 'claude-3-7-sonnet']),
-      ['--dangerously-skip-permissions'],
+      [],
     );
   });
 
