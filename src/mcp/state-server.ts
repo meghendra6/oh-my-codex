@@ -813,6 +813,12 @@ export async function handleStateToolCall(request: {
   switch (name) {
     case 'state_read': {
       const mode = (args as Record<string, unknown>).mode as string;
+      if (!SUPPORTED_MODES.includes(mode as typeof SUPPORTED_MODES[number])) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: `mode must be one of: ${SUPPORTED_MODES.join(', ')}` }) }],
+          isError: true,
+        };
+      }
       const paths = await getReadScopedStatePaths(mode, cwd, explicitSessionId);
       const path = paths.find((candidate) => existsSync(candidate));
       if (!path) {

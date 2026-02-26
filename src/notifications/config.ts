@@ -157,10 +157,11 @@ export function buildConfigFromEnv(): FullNotificationConfig | null {
 
   const slackWebhook = process.env.OMX_SLACK_WEBHOOK_URL;
   if (slackWebhook) {
+    const slackMention = validateSlackMention(process.env.OMX_SLACK_MENTION);
     config.slack = {
       enabled: true,
       webhookUrl: slackWebhook,
-      mention: validateSlackMention(process.env.OMX_SLACK_MENTION),
+      ...(slackMention !== undefined && { mention: slackMention }),
     };
     hasAnyPlatform = true;
   }

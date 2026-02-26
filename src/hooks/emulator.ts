@@ -96,29 +96,16 @@ export const HOOK_MAPPING: Record<HookEvent, {
  * Keyword detection configuration (embedded in AGENTS.md)
  * Instead of external hook detection, the model is instructed to self-detect
  */
-export const KEYWORD_TRIGGERS: Record<string, string> = {
-  'autopilot': 'Activate autopilot skill for autonomous execution',
-  'ralph': 'Activate ralph persistence loop with verification',
-  'ultrawork': 'Activate ultrawork parallel execution mode',
-  'ulw': 'Activate ultrawork parallel execution mode',
-  'ecomode': 'Activate ecomode for token-efficient execution',
-  'eco': 'Activate ecomode for token-efficient execution',
-  'plan': 'Activate planning skill',
-  'ralplan': 'Activate consensus planning with RALPLAN-DR structured deliberation (planner + architect + critic)',
-  'team': 'Activate coordinated team mode',
-  'coordinated team': 'Activate coordinated team mode',
-  'swarm': 'Activate coordinated team mode (swarm is a compatibility alias for team)',
-  'coordinated swarm': 'Activate coordinated team mode (swarm is a compatibility alias for team)',
-  'research': 'Activate parallel research mode',
-  'cancel': 'Cancel active execution modes',
-};
+export const KEYWORD_TRIGGERS: Record<string, string> = Object.fromEntries(
+  KEYWORD_TRIGGER_DEFINITIONS.map(({ keyword, guidance }) => [keyword, guidance]),
+);
 
 /**
  * Generate the keyword detection section for AGENTS.md
  */
 export function generateKeywordDetectionSection(): string {
-  const lines = Object.entries(KEYWORD_TRIGGERS)
-    .map(([keyword, action]) => `- When user says "${keyword}": ${action}`)
+  const lines = KEYWORD_TRIGGER_DEFINITIONS
+    .map(({ keyword, guidance }) => `- When user says "${keyword}": ${guidance}`)
     .join('\n');
 
   return `

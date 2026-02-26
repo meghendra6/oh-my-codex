@@ -115,8 +115,9 @@ function renderQuota(ctx: HudRenderContext): string | null {
 function renderLastActivity(ctx: HudRenderContext): string | null {
   if (!ctx.hudNotify?.last_turn_at) return null;
   const lastAt = new Date(ctx.hudNotify.last_turn_at).getTime();
+  if (Number.isNaN(lastAt)) return null;
   const now = Date.now();
-  const diffSec = Math.round((now - lastAt) / 1000);
+  const diffSec = Math.max(0, Math.round((now - lastAt) / 1000));
 
   if (diffSec < 60) return dim(`last:${diffSec}s ago`);
   const diffMin = Math.round(diffSec / 60);
@@ -131,8 +132,9 @@ function renderTotalTurns(ctx: HudRenderContext): string | null {
 function renderSessionDuration(ctx: HudRenderContext): string | null {
   if (!ctx.session?.started_at) return null;
   const startedAt = new Date(ctx.session.started_at).getTime();
+  if (Number.isNaN(startedAt)) return null;
   const now = Date.now();
-  const diffSec = Math.round((now - startedAt) / 1000);
+  const diffSec = Math.max(0, Math.round((now - startedAt) / 1000));
 
   if (diffSec < 60) return dim(`session:${diffSec}s`);
   if (diffSec < 3600) return dim(`session:${Math.round(diffSec / 60)}m`);
