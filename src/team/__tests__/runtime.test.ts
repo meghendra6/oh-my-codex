@@ -10,7 +10,9 @@ import {
   createTask,
   writeWorkerIdentity,
   readTeamConfig,
+  saveTeamConfig,
   listMailboxMessages,
+  listDispatchRequests,
   updateWorkerHeartbeat,
   writeAtomic,
   readTask,
@@ -1199,6 +1201,50 @@ esac
       assert.equal(messages[0]?.to_worker, 'leader-fixed');
       assert.equal(messages[1]?.to_worker, 'leader-fixed');
     } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('sendWorkerMessage hook-preferred path for leader waits for receipt then falls back to direct notify', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-runtime-leader-hook-'));
+    const binDir = join(cwd, 'bin');
+    const fakeTmuxPath = join(binDir, 'tmux');
+    const prevPath = process.env.PATH;
+    try {
+      await mkdir(binDir, { recursive: true });
+      await writeFile(
+        fakeTmuxPath,
+        `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === '-V') {
+  console.log('tmux 3.4');
+  process.exit(0);
+}
+process.exit(0);
+`,
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${binDir}:${prevPath ?? ''}`;
+
+      await initTeamState('team-leader-hook', 'leader hook fallback test', 'executor', 1, cwd);
+      const cfg = await readTeamConfig('team-leader-hook', cwd);
+      assert.ok(cfg);
+      if (!cfg) throw new Error('missing team config');
+      cfg.leader_pane_id = '%999';
+      await saveTeamConfig(cfg, cwd);
+      await sendWorkerMessage('team-leader-hook', 'worker-1', 'leader-fixed', 'hello leader', cwd);
+
+      const mailbox = await listMailboxMessages('team-leader-hook', 'leader-fixed', cwd);
+      assert.equal(mailbox.length, 1);
+      assert.ok(mailbox[0]?.notified_at);
+
+      const requests = await listDispatchRequests('team-leader-hook', cwd, { kind: 'mailbox' });
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0]?.status, 'notified');
+      assert.match(requests[0]?.last_reason ?? '', /^fallback_confirmed:/);
+    } finally {
+      if (typeof prevPath === 'string') process.env.PATH = prevPath;
+      else delete process.env.PATH;
       await rm(cwd, { recursive: true, force: true });
     }
   });
