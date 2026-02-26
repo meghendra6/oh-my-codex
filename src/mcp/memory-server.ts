@@ -14,6 +14,7 @@ import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import { parseNotepadPruneDaysOld } from './memory-validation.js';
+import { shouldAutoStartMcpServer } from './bootstrap.js';
 
 function getMemoryPath(wd?: string): string {
   return join(wd || process.cwd(), '.omx', 'project-memory.json');
@@ -394,5 +395,7 @@ function appendToSection(content: string, section: string, entry: string): strin
   return content.slice(0, nextHeader) + entry + content.slice(nextHeader);
 }
 
-const transport = new StdioServerTransport();
-server.connect(transport).catch(console.error);
+if (shouldAutoStartMcpServer('memory')) {
+  const transport = new StdioServerTransport();
+  server.connect(transport).catch(console.error);
+}

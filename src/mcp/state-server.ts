@@ -27,6 +27,7 @@ import { withModeRuntimeContext } from '../state/mode-state-context.js';
 import { ensureTmuxHookInitialized } from '../cli/tmux-hook.js';
 import { RALPH_PHASES, validateAndNormalizeRalphState } from '../ralph/contract.js';
 import { ensureCanonicalRalphArtifacts } from '../ralph/persistence.js';
+import { shouldAutoStartMcpServer } from './bootstrap.js';
 import {
   TEAM_NAME_SAFE_PATTERN,
   WORKER_NAME_SAFE_PATTERN,
@@ -1391,7 +1392,7 @@ export async function handleStateToolCall(request: {
 server.setRequestHandler(CallToolRequestSchema, handleStateToolCall);
 
 // Start server
-if (process.env.OMX_STATE_SERVER_DISABLE_AUTO_START !== '1') {
+if (shouldAutoStartMcpServer('state')) {
   const transport = new StdioServerTransport();
   server.connect(transport).catch(console.error);
 }
