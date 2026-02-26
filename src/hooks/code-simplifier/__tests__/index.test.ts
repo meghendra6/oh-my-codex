@@ -42,6 +42,7 @@ function writeEnabledCodeSimplifierConfig(homeDir: string): void {
     'utf-8',
   );
 }
+
 describe('code-simplifier trigger marker', () => {
   let stateDir: string;
 
@@ -186,40 +187,22 @@ describe('processCodeSimplifier', () => {
   let stateDir: string;
   let cwd: string;
   let homeDir: string;
-  let originalHome: string | undefined;
-  let originalUserProfile: string | undefined;
 
   beforeEach(() => {
     stateDir = makeTmpDir();
     cwd = makeTmpDir();
     homeDir = makeTmpDir();
-    originalHome = process.env.HOME;
-    originalUserProfile = process.env.USERPROFILE;
-    process.env.HOME = homeDir;
-    process.env.USERPROFILE = homeDir;
   });
 
   afterEach(() => {
-    if (typeof originalHome === 'string') {
-      process.env.HOME = originalHome;
-    } else {
-      delete process.env.HOME;
-    }
-
-    if (typeof originalUserProfile === 'string') {
-      process.env.USERPROFILE = originalUserProfile;
-    } else {
-      delete process.env.USERPROFILE;
-    }
-
     rmSync(stateDir, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
     rmSync(homeDir, { recursive: true, force: true });
   });
 
   it('returns not triggered when disabled (no config)', () => {
-    // processCodeSimplifier reads ~/.omx/config.json and is disabled by default.
-    const result = processCodeSimplifier(cwd, stateDir);
+    // Pass homeDir as configDir — no config file exists there, so disabled.
+    const result = processCodeSimplifier(cwd, stateDir, homeDir);
 
     assert.equal(result.triggered, false);
     assert.equal(result.message, '');

@@ -10,7 +10,7 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
-import { homedir as osHomedir } from 'os';
+import { homedir } from 'os';
 import { execSync } from 'child_process';
 
 /** Config shape for the code-simplifier feature */
@@ -42,10 +42,13 @@ export const TRIGGER_MARKER_FILENAME = 'code-simplifier-triggered.marker';
 /**
  * Read the global OMX config from ~/.omx/config.json.
  * Returns null if the file does not exist or cannot be parsed.
+ *
+ * @param configDir - Optional override for the home directory. When provided,
+ *   the config is read from `<configDir>/.omx/config.json` instead of
+ *   `~/.omx/config.json`. Useful for testing without relying on `os.homedir()`.
  */
 export function readOmxConfig(configDir?: string): OmxGlobalConfig | null {
-  const home = configDir ?? (process.env.HOME || process.env.USERPROFILE || osHomedir());
-  const configPath = join(home, '.omx', 'config.json');
+  const configPath = join(configDir ?? homedir(), '.omx', 'config.json');
 
   if (!existsSync(configPath)) {
     return null;
@@ -85,16 +88,15 @@ export function getModifiedFiles(
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 5000,
     });
-    const lines = output
-      .split('\n')
-      .map((line) => line.trimEnd())
-      .filter((line) => line.trim().length > 0);
-
-    if (lines.length === 0) {
+    const trimmedOutput = output.trimEnd();
+    if (trimmedOutput.length === 0) {
       return [];
     }
 
-    const candidates = lines
+    const candidates = trimmedOutput
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0)
       .flatMap((line) => {
         if (line.startsWith('?? ')) {
           return [line.slice(3).trim()];
