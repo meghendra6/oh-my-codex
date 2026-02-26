@@ -5,7 +5,7 @@
  */
 
 import type { HudRenderContext, HudPreset } from './types.js';
-import { green, yellow, cyan, dim, bold, getRalphColor, RESET } from './colors.js';
+import { green, yellow, cyan, dim, bold, getRalphColor, isColorEnabled, RESET } from './colors.js';
 
 const SEP = dim(' | ');
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
@@ -44,6 +44,7 @@ function renderGitBranch(ctx: HudRenderContext): string | null {
 function renderRalph(ctx: HudRenderContext): string | null {
   if (!ctx.ralph) return null;
   const { iteration, max_iterations } = ctx.ralph;
+  if (!isColorEnabled()) return `ralph:${iteration}/${max_iterations}`;
   const color = getRalphColor(iteration, max_iterations);
   return `${color}ralph:${iteration}/${max_iterations}${RESET}`;
 }

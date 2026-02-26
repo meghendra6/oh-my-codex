@@ -18,6 +18,7 @@ export interface TeamConfig {
   name: string;
   task: string;
   agent_type: string;
+  worker_launch_mode: 'interactive' | 'prompt';
   worker_count: number;
   max_workers: number; // default 20, configurable up to 20
   workers: WorkerInfo[];
@@ -584,6 +585,7 @@ export async function initTeamState(
     name: teamName,
     task,
     agent_type: agentType,
+    worker_launch_mode: workerLaunchMode,
     worker_count: workerCount,
     max_workers: maxWorkers,
     workers,
@@ -672,10 +674,12 @@ async function writeConfig(cfg: TeamConfig, cwd: string): Promise<void> {
 }
 
 function teamConfigFromManifest(manifest: TeamManifestV2): TeamConfig {
+  const workerLaunchMode = manifest.policy?.worker_launch_mode === 'prompt' ? 'prompt' : 'interactive';
   return {
     name: manifest.name,
     task: manifest.task,
     agent_type: manifest.workers[0]?.role ?? 'executor',
+    worker_launch_mode: workerLaunchMode,
     worker_count: manifest.worker_count,
     max_workers: DEFAULT_MAX_WORKERS,
     workers: manifest.workers,

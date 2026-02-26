@@ -11,6 +11,12 @@ import {
 } from '../keyword-detector.js';
 import { generateKeywordDetectionSection } from '../emulator.js';
 import { isUnderspecifiedForExecution, applyRalplanGate } from '../keyword-detector.js';
+import { KEYWORD_TRIGGER_DEFINITIONS } from '../keyword-registry.js';
+
+async function readTemplateKeywords(): Promise<string[]> {
+  const section = generateKeywordDetectionSection();
+  return [...section.matchAll(/- When user says "([^"]+)":/g)].map((m: RegExpMatchArray) => m[1]);
+}
 
 describe('keyword detector swarm/team compatibility', () => {
   it('maps "coordinated team" phrase to team orchestration skill', () => {
@@ -85,7 +91,7 @@ describe('keyword detector swarm/team compatibility', () => {
 
 describe('keyword detection guidance generation', () => {
   it('keeps template keyword table and runtime keyword registry in sync', async () => {
-    const templateKeywords = new Set((await readTemplateKeywords()).map((v) => v.toLowerCase()));
+    const templateKeywords = new Set((await readTemplateKeywords()).map((v: string) => v.toLowerCase()));
     const registryKeywords = new Set(KEYWORD_TRIGGER_DEFINITIONS.map((v) => v.keyword.toLowerCase()));
     assert.deepEqual([...registryKeywords].sort(), [...templateKeywords].sort());
   });

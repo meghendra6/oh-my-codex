@@ -13,31 +13,46 @@ const RED = '\x1b[31m';
 const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
 const CYAN = '\x1b[36m';
+let colorEnabled = true;
+
+export function setColorEnabled(enabled: boolean): void {
+  colorEnabled = enabled;
+}
+
+export function isColorEnabled(): boolean {
+  return colorEnabled;
+}
+
+function wrapColor(code: string, text: string): string {
+  if (!colorEnabled) return text;
+  return `${code}${text}${RESET}`;
+}
 
 export function green(text: string): string {
-  return `${GREEN}${text}${RESET}`;
+  return wrapColor(GREEN, text);
 }
 
 export function yellow(text: string): string {
-  return `${YELLOW}${text}${RESET}`;
+  return wrapColor(YELLOW, text);
 }
 
 export function cyan(text: string): string {
-  return `${CYAN}${text}${RESET}`;
+  return wrapColor(CYAN, text);
 }
 
 export function dim(text: string): string {
-  return `${DIM}${text}${RESET}`;
+  return wrapColor(DIM, text);
 }
 
 export function bold(text: string): string {
-  return `${BOLD}${text}${RESET}`;
+  return wrapColor(BOLD, text);
 }
 
 /**
  * Get color code based on ralph iteration progress.
  */
 export function getRalphColor(iteration: number, maxIterations: number): string {
+  if (!colorEnabled) return '';
   const warningThreshold = Math.floor(maxIterations * 0.7);
   const criticalThreshold = Math.floor(maxIterations * 0.9);
 

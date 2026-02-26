@@ -11,7 +11,10 @@
  * to an external hook handler.
  */
 
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { classifyTaskSize, isHeavyMode, type TaskSizeResult, type TaskSizeThresholds } from './task-size-detector.js';
+import { KEYWORD_TRIGGER_DEFINITIONS, compareKeywordMatches } from './keyword-registry.js';
 
 export interface KeywordMatch {
   keyword: string;
@@ -45,6 +48,15 @@ export interface RecordSkillActivationInput {
 }
 
 export const SKILL_ACTIVE_STATE_FILE = 'skill-active-state.json';
+
+async function readExistingSkillState(statePath: string): Promise<SkillActiveState | null> {
+  try {
+    const raw = await readFile(statePath, 'utf-8');
+    return JSON.parse(raw) as SkillActiveState;
+  } catch {
+    return null;
+  }
+}
 
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -120,6 +132,39 @@ export function detectKeywords(text: string): KeywordMatch[] {
 export function detectPrimaryKeyword(text: string): KeywordMatch | null {
   const matches = detectKeywords(text);
   return matches.length > 0 ? matches[0] : null;
+}
+
+export async function recordSkillActivation(input: RecordSkillActivationInput): Promise<SkillActiveState | null> {
+  const match = detectPrimaryKeyword(input.text);
+  if (!match) return null;
+
+  const nowIso = input.nowIso ?? new Date().toISOString();
+  const statePath = join(input.stateDir, SKILL_ACTIVE_STATE_FILE);
+  const previous = await readExistingSkillState(statePath);
+  const sameSkill = previous?.active === true && previous.skill === match.skill;
+  const sameKeyword = previous?.keyword?.toLowerCase() === match.keyword.toLowerCase();
+
+  const state: SkillActiveState = {
+    version: 1,
+    active: true,
+    skill: match.skill,
+    keyword: match.keyword,
+    phase: 'planning',
+    activated_at: sameSkill && sameKeyword ? previous.activated_at : nowIso,
+    updated_at: nowIso,
+    source: 'keyword-detector',
+    session_id: input.sessionId,
+    thread_id: input.threadId,
+    turn_id: input.turnId,
+  };
+
+  try {
+    await writeFile(statePath, JSON.stringify(state, null, 2));
+  } catch (error) {
+    console.warn('[omx] warning: failed to persist keyword activation state', error);
+  }
+
+  return state;
 }
 
 /**
