@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-02-26
+
+4 files changed. Team dispatch reliability improvements — state-first routing with hook-preferred fallback.
+
+### Changed
+- Team dispatch rewritten to be state-first and hook-preferred, improving reliability when leader pane targeting varies (#379).
+- Leader mailbox delivery uses hook-preferred dispatch path for consistent message routing (#378).
+
+### Fixed
+- Leader fallback parity guarded to only target real pane destinations, preventing dispatch to stale or missing panes (#379).
+- Hook dispatch reliability paths hardened with additional error guards and fallback sequencing (#378).
+
 ## [0.7.0] - 2026-02-26
 
 153 files changed, +12,852 / -1,044 lines. Major feature additions, comprehensive audit fixes, and hardened reliability.
