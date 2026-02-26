@@ -15,6 +15,7 @@ import { join } from 'path';
 import { createReadStream, existsSync } from 'fs';
 import { createInterface } from 'readline';
 import { listModeStateFilesWithScopePreference } from './state-paths.js';
+import { shouldAutoStartMcpServer } from './bootstrap.js';
 
 function text(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
@@ -320,7 +321,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-if (process.env.OMX_TRACE_SERVER_DISABLE_AUTO_START !== '1') {
+if (shouldAutoStartMcpServer('trace')) {
   const transport = new StdioServerTransport();
   server.connect(transport).catch(console.error);
 }
