@@ -30,6 +30,7 @@ export const TEAM_EVENT_TYPES = [
   'message_received',
   'shutdown_ack',
   'shutdown_gate',
+  'shutdown_gate_forced',
   'approval_decision',
   'team_leader_nudge',
 ] as const;

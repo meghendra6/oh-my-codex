@@ -1140,6 +1140,14 @@ export async function shutdownTeam(teamName: string, cwd: string, options: Shutd
     }
   }
 
+  if (force) {
+    await appendTeamEvent(sanitized, {
+      type: 'shutdown_gate_forced',
+      worker: 'leader-fixed',
+      reason: 'force_bypass',
+    }, cwd).catch(() => {});
+  }
+
   const sessionName = config.tmux_session;
   const manifest = await readTeamManifestV2(sanitized, cwd);
   const dispatchPolicy = resolveDispatchPolicy(manifest?.policy, config.worker_launch_mode);

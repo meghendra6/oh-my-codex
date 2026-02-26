@@ -170,8 +170,9 @@ export async function teamCommand(args: string[], options: TeamCliOptions = {}):
 
   if (subcommand === 'shutdown') {
     const name = teamArgs[1];
-    if (!name) throw new Error('Usage: omx team shutdown <team-name>');
-    await shutdownTeam(name, cwd, { force: false });
+    if (!name) throw new Error('Usage: omx team shutdown <team-name> [--force]');
+    const force = teamArgs.includes('--force');
+    await shutdownTeam(name, cwd, { force });
     await updateModeState('team', {
       active: false,
       current_phase: 'cancelled',

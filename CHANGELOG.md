@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-02-26
+
+Hotfix: team shutdown `--force` flag was not being parsed from CLI arguments.
+
+### Fixed
+- Team shutdown `--force` flag now correctly parsed from CLI args instead of being hardcoded to `false` (`src/cli/team.ts`).
+- Added `shutdown_gate_forced` audit event when force-bypass is used, closing an observability gap in the event log.
+
+### Changed
+- Updated usage string to document `[--force]` option: `omx team shutdown <team-name> [--force]`.
+- Added `shutdown_gate_forced` to `TeamEventType` union and `TEAM_EVENT_TYPES` constant.
+
 ## [0.7.1] - 2026-02-26
 
 4 files changed. Team dispatch reliability improvements — state-first routing with hook-preferred fallback.

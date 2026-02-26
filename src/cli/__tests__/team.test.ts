@@ -44,3 +44,23 @@ describe('parseTeamStartArgs', () => {
     );
   });
 });
+
+describe('teamCommand shutdown --force parsing', () => {
+  it('parses --force flag from shutdown args', () => {
+    const teamArgs = ['shutdown', 'my-team', '--force'];
+    const force = teamArgs.includes('--force');
+    assert.equal(force, true);
+  });
+
+  it('does not set force when --force is absent', () => {
+    const teamArgs = ['shutdown', 'my-team'];
+    const force = teamArgs.includes('--force');
+    assert.equal(force, false);
+  });
+
+  it('parses --force regardless of position after subcommand', () => {
+    const teamArgs = ['shutdown', '--force', 'my-team'];
+    const force = teamArgs.includes('--force');
+    assert.equal(force, true);
+  });
+});

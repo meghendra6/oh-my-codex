@@ -200,6 +200,7 @@ export interface TeamEvent {
     | 'message_received'
     | 'shutdown_ack'
     | 'shutdown_gate'
+    | 'shutdown_gate_forced'
     | 'approval_decision'
     | 'team_leader_nudge';
   worker: string;
