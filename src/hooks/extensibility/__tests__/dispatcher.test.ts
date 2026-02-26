@@ -202,4 +202,38 @@ export async function onHookEvent() {}
       await rm(cwd, { recursive: true, force: true });
     }
   });
+
+  it('returns timeout promptly when plugin ignores SIGTERM', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-dispatch-'));
+    try {
+      const dir = join(cwd, '.omx', 'hooks');
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, 'ignore-sigterm.mjs'),
+        `export async function onHookEvent() {
+          process.on('SIGTERM', () => {});
+          setInterval(() => {}, 60_000);
+          await new Promise(() => {});
+        }`,
+      );
+
+      const event = buildHookEvent('session-start');
+      const startedAt = Date.now();
+      const result = await dispatchHookEvent(event, {
+        cwd,
+        timeoutMs: 50,
+        env: { ...process.env, OMX_HOOK_PLUGINS: '1' },
+      });
+      const elapsedMs = Date.now() - startedAt;
+
+      assert.equal(result.enabled, true);
+      assert.equal(result.plugin_count, 1);
+      assert.equal(result.results.length, 1);
+      assert.equal(result.results[0].ok, false);
+      assert.equal(result.results[0].status, 'timeout');
+      assert.ok(elapsedMs < 1500, `dispatch should timeout promptly (elapsed=${elapsedMs}ms)`);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
 });

@@ -23,6 +23,7 @@ interface RunnerResult {
 }
 
 const RESULT_PREFIX = '__OMX_PLUGIN_RESULT__ ';
+const RUNNER_SIGKILL_GRACE_MS = 250;
 
 function hooksLogPath(cwd: string): string {
   const day = new Date().toISOString().slice(0, 10);
@@ -83,10 +84,47 @@ async function runPluginRunner(
     let stderr = '';
     let done = false;
     let timedOut = false;
+    let sigkillTimer: NodeJS.Timeout | undefined;
+
+    const settle = (result: HookPluginDispatchResult, clearSigkillTimer = true) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (clearSigkillTimer && sigkillTimer) {
+        clearTimeout(sigkillTimer);
+        sigkillTimer = undefined;
+      }
+      resolve(result);
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // Ignore if process already exited.
+      }
+      sigkillTimer = setTimeout(() => {
+        sigkillTimer = undefined;
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Ignore if process already exited.
+        }
+      }, RUNNER_SIGKILL_GRACE_MS);
+
+      const duration = Date.now() - started;
+      settle({
+        plugin: plugin.id,
+        path: plugin.path,
+        file: plugin.file,
+        plugin_id: plugin.id,
+        ok: false,
+        status: 'timeout',
+        reason: 'timeout',
+        durationMs: duration,
+        duration_ms: duration,
+      }, false);
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
@@ -98,11 +136,8 @@ async function runPluginRunner(
     });
 
     child.on('error', (error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
       const duration = Date.now() - started;
-      resolve({
+      settle({
         plugin: plugin.id,
         path: plugin.path,
         file: plugin.file,
@@ -118,12 +153,10 @@ async function runPluginRunner(
 
     child.on('close', () => {
       if (done) return;
-      done = true;
-      clearTimeout(timer);
       const duration = Date.now() - started;
 
       if (timedOut) {
-        resolve({
+        settle({
           plugin: plugin.id,
           path: plugin.path,
           file: plugin.file,
@@ -149,7 +182,7 @@ async function runPluginRunner(
       }
 
       if (parsed?.ok) {
-        resolve({
+        settle({
           plugin: plugin.id,
           path: plugin.path,
           file: plugin.file,
@@ -164,7 +197,7 @@ async function runPluginRunner(
       }
 
       const reason = parsed?.reason || 'plugin_error';
-      resolve({
+      settle({
         plugin: plugin.id,
         path: plugin.path,
         file: plugin.file,
