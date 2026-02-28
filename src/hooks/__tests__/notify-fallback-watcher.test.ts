@@ -351,7 +351,7 @@ describe('notify-fallback watcher', () => {
     }
   });
 
-  it('watcher retry allows one fallback retype only when pre-capture misses trigger', async () => {
+  it('retypes on every retry when trigger is not in narrow input area', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-fallback-dispatch-cm-fallback-'));
     const fakeBinDir = join(wd, 'fake-bin');
     const tmuxLogPath = join(wd, 'tmux.log');
@@ -361,12 +361,15 @@ describe('notify-fallback watcher', () => {
       await mkdir(fakeBinDir, { recursive: true });
       await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(tmuxLogPath));
       await chmod(join(fakeBinDir, 'tmux'), 0o755);
+      // Verify loop uses 2 captures/round (narrow+wide) × 3 rounds = 6 per attempt.
+      // Pre-capture on retries adds 1 more. "ready" = no trigger in narrow area → retype.
       await writeFile(captureSeqFile, [
-        'dispatch ping', 'dispatch ping', 'dispatch ping',
-        'ready',
-        'dispatch ping', 'dispatch ping', 'dispatch ping',
-        'ready',
-        'dispatch ping', 'dispatch ping', 'dispatch ping',
+        // Run 1 (attempt 0): no pre-capture, type, 6 verify captures
+        'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping',
+        // Run 2 (attempt 1): 1 pre-capture ("ready" → retype), 6 verify captures
+        'ready', 'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping',
+        // Run 3 (attempt 2): 1 pre-capture ("ready" → retype), 6 verify captures
+        'ready', 'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping', 'dispatch ping',
       ].join('\n'));
 
       await initTeamState('dispatch-team', 'task', 'executor', 1, wd);
@@ -398,7 +401,7 @@ describe('notify-fallback watcher', () => {
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf8');
       const typeMatches = tmuxLog.match(/send-keys -t %42 -l dispatch ping/g) || [];
-      assert.equal(typeMatches.length, 2, 'fresh + one retry fallback retype max');
+      assert.equal(typeMatches.length, 3, 'initial + retype on every retry when trigger absent from narrow area');
 
       const request = await readDispatchRequest('dispatch-team', queued.request.request_id, wd);
       assert.equal(request?.status, 'failed');
