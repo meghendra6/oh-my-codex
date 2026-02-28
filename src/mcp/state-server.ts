@@ -76,13 +76,6 @@ const SUPPORTED_MODES = [
   'ralph', 'ultrawork', 'ultraqa', 'ralplan',
 ] as const;
 
-/** @deprecated Modes removed in v4.6. Kept for deprecation warnings only. */
-const DEPRECATED_MODE_MAP: Record<string, string> = {
-  ultrapilot: 'team',
-  pipeline: 'team',
-  ecomode: 'ultrawork',
-};
-
 const STATE_TOOL_NAMES = new Set([
   'state_read',
   'state_write',
