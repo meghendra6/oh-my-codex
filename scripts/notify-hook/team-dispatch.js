@@ -149,6 +149,21 @@ function capturedPaneContainsTrigger(captured, trigger) {
   return normalizeCaptureText(captured).includes(normalizeCaptureText(trigger));
 }
 
+// Ported from src/team/tmux-session.ts:949-963 — detects active CLI task indicators.
+function paneHasActiveTask(captured) {
+  const lines = safeString(captured)
+    .split('\n')
+    .map((line) => line.replace(/\r/g, '').trim())
+    .filter((line) => line.length > 0);
+  const tail = lines.slice(-40);
+  if (tail.some((line) => /esc to interrupt/i.test(line))) return true;
+  if (tail.some((line) => /\bbackground terminal running\b/i.test(line))) return true;
+  if (tail.some((line) => /^•\s.+\(.+•\s*esc to interrupt\)$/i.test(line))) return true;
+  // Claude active generation lines
+  if (tail.some((line) => /^[·✻]\s+[A-Za-z][A-Za-z0-9''-]*(?:\s+[A-Za-z][A-Za-z0-9''-]*){0,3}(?:…|\.{3})$/u.test(line))) return true;
+  return false;
+}
+
 const INJECT_VERIFY_DELAY_MS = 250;
 const INJECT_VERIFY_ROUNDS = 3;
 
@@ -183,16 +198,23 @@ async function injectDispatchRequest(request, config, cwd) {
   let preCaptureHasTrigger = false;
   if (attemptCountAtStart >= 1) {
     try {
-      const preCapture = await runProcess('tmux', buildCapturePaneArgv(resolution.paneTarget), 2000);
+      // Narrow capture (8 lines) to scope check to input area, not scrollback output
+      const preCapture = await runProcess('tmux', buildCapturePaneArgv(resolution.paneTarget, 8), 2000);
       preCaptureHasTrigger = capturedPaneContainsTrigger(preCapture.stdout, request.trigger_message);
     } catch {
       preCaptureHasTrigger = false;
     }
   }
 
-  const shouldTypePrompt = attemptCountAtStart === 0
-    || (attemptCountAtStart === 1 && !preCaptureHasTrigger);
+  // Retype whenever trigger text is NOT in the narrow input area, regardless of attempt count.
+  // Pre-0.7.4 bug: 80-line capture matched trigger in scrollback output, falsely skipping retype.
+  const shouldTypePrompt = attemptCountAtStart === 0 || !preCaptureHasTrigger;
   if (shouldTypePrompt) {
+    if (attemptCountAtStart >= 1) {
+      // Clear stale text in input buffer before retyping (mirrors sync path tmux-session.ts:1270)
+      await runProcess('tmux', ['send-keys', '-t', resolution.paneTarget, 'C-u'], 1000).catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+    }
     await runProcess('tmux', argv.typeArgv, 3000);
   }
 
@@ -203,18 +225,25 @@ async function injectDispatchRequest(request, config, cwd) {
   // Post-injection verification: confirm the trigger text was consumed.
   // Fixes #391: without this, dispatch marks 'notified' even when the worker
   // pane is sitting on an unsent draft (C-m was not effectively applied).
-  const captureArgv = buildCapturePaneArgv(resolution.paneTarget);
+  const verifyNarrowArgv = buildCapturePaneArgv(resolution.paneTarget, 8);
+  const verifyWideArgv = buildCapturePaneArgv(resolution.paneTarget);
   for (let round = 0; round < INJECT_VERIFY_ROUNDS; round++) {
     await new Promise((r) => setTimeout(r, INJECT_VERIFY_DELAY_MS));
     try {
-      const cap = await runProcess('tmux', captureArgv, 2000);
-      if (!capturedPaneContainsTrigger(cap.stdout, request.trigger_message)) {
+      // Primary: trigger text no longer in narrow input area
+      const narrowCap = await runProcess('tmux', verifyNarrowArgv, 2000);
+      if (!capturedPaneContainsTrigger(narrowCap.stdout, request.trigger_message)) {
         return { ok: true, reason: 'tmux_send_keys_confirmed', pane: resolution.paneTarget };
+      }
+      // Secondary: worker is actively processing (mirrors sync path tmux-session.ts:1292-1294)
+      const wideCap = await runProcess('tmux', verifyWideArgv, 2000);
+      if (paneHasActiveTask(wideCap.stdout)) {
+        return { ok: true, reason: 'tmux_send_keys_confirmed_active_task', pane: resolution.paneTarget };
       }
     } catch {
       // capture failed; fall through to retry C-m
     }
-    // Draft still visible — retry C-m
+    // Draft still visible and no active task — retry C-m
     for (const submit of argv.submitArgv) {
       await runProcess('tmux', submit, 3000).catch(() => {});
     }
