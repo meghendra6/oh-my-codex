@@ -5,9 +5,14 @@
  */
 
 import type { HudRenderContext, HudPreset } from './types.js';
-import { green, yellow, cyan, dim, bold, getRalphColor, RESET } from './colors.js';
+import { green, yellow, cyan, dim, bold, getRalphColor, isColorEnabled, RESET } from './colors.js';
 
 const SEP = dim(' | ');
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+
+function sanitizeDynamicText(value: string): string {
+  return value.replace(CONTROL_CHARS_RE, '');
+}
 
 function formatTokenCount(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -31,12 +36,15 @@ function isCurrentSessionMetrics(ctx: HudRenderContext): boolean {
 
 function renderGitBranch(ctx: HudRenderContext): string | null {
   if (!ctx.gitBranch) return null;
-  return cyan(ctx.gitBranch);
+  const gitBranch = sanitizeDynamicText(ctx.gitBranch);
+  if (!gitBranch) return null;
+  return cyan(gitBranch);
 }
 
 function renderRalph(ctx: HudRenderContext): string | null {
   if (!ctx.ralph) return null;
   const { iteration, max_iterations } = ctx.ralph;
+  if (!isColorEnabled()) return `ralph:${iteration}/${max_iterations}`;
   const color = getRalphColor(iteration, max_iterations);
   return `${color}ralph:${iteration}/${max_iterations}${RESET}`;
 }
@@ -48,14 +56,14 @@ function renderUltrawork(ctx: HudRenderContext): string | null {
 
 function renderAutopilot(ctx: HudRenderContext): string | null {
   if (!ctx.autopilot) return null;
-  const phase = ctx.autopilot.current_phase || 'active';
+  const phase = sanitizeDynamicText(ctx.autopilot.current_phase || 'active') || 'active';
   return yellow(`autopilot:${phase}`);
 }
 
 function renderTeam(ctx: HudRenderContext): string | null {
   if (!ctx.team) return null;
   const count = ctx.team.agent_count;
-  const name = ctx.team.team_name;
+  const name = ctx.team.team_name ? sanitizeDynamicText(ctx.team.team_name) : '';
   if (count !== undefined && count > 0) {
     return green(`team:${count} workers`);
   }
@@ -63,17 +71,6 @@ function renderTeam(ctx: HudRenderContext): string | null {
     return green(`team:${name}`);
   }
   return green('team');
-}
-
-function renderEcomode(ctx: HudRenderContext): string | null {
-  if (!ctx.ecomode) return null;
-  return dim('ecomode');
-}
-
-function renderPipeline(ctx: HudRenderContext): string | null {
-  if (!ctx.pipeline) return null;
-  const phase = ctx.pipeline.current_phase || 'active';
-  return cyan(`pipeline:${phase}`);
 }
 
 function renderTurns(ctx: HudRenderContext): string | null {
@@ -107,8 +104,9 @@ function renderQuota(ctx: HudRenderContext): string | null {
 function renderLastActivity(ctx: HudRenderContext): string | null {
   if (!ctx.hudNotify?.last_turn_at) return null;
   const lastAt = new Date(ctx.hudNotify.last_turn_at).getTime();
+  if (Number.isNaN(lastAt)) return null;
   const now = Date.now();
-  const diffSec = Math.round((now - lastAt) / 1000);
+  const diffSec = Math.max(0, Math.round((now - lastAt) / 1000));
 
   if (diffSec < 60) return dim(`last:${diffSec}s ago`);
   const diffMin = Math.round(diffSec / 60);
@@ -123,8 +121,9 @@ function renderTotalTurns(ctx: HudRenderContext): string | null {
 function renderSessionDuration(ctx: HudRenderContext): string | null {
   if (!ctx.session?.started_at) return null;
   const startedAt = new Date(ctx.session.started_at).getTime();
+  if (Number.isNaN(startedAt)) return null;
   const now = Date.now();
-  const diffSec = Math.round((now - startedAt) / 1000);
+  const diffSec = Math.max(0, Math.round((now - startedAt) / 1000));
 
   if (diffSec < 60) return dim(`session:${diffSec}s`);
   if (diffSec < 3600) return dim(`session:${Math.round(diffSec / 60)}m`);
@@ -153,8 +152,6 @@ const FOCUSED_ELEMENTS: ElementRenderer[] = [
   renderUltrawork,
   renderAutopilot,
   renderTeam,
-  renderPipeline,
-  renderEcomode,
   renderTurns,
   renderTokens,
   renderQuota,
@@ -168,8 +165,6 @@ const FULL_ELEMENTS: ElementRenderer[] = [
   renderUltrawork,
   renderAutopilot,
   renderTeam,
-  renderPipeline,
-  renderEcomode,
   renderTurns,
   renderTokens,
   renderQuota,

@@ -12,17 +12,14 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { execFile } from 'child_process';
 import { readFile, readdir } from 'fs/promises';
-import { join, relative, extname, basename } from 'path';
+import { join, relative, extname, basename, resolve } from 'path';
 import { existsSync } from 'fs';
 import { promisify } from 'util';
+import { shouldAutoStartMcpServer } from './bootstrap.js';
 
 const execFileAsync = promisify(execFile);
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-
-function cwd(wd?: string): string {
-  return wd || process.cwd();
-}
 
 function text(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
@@ -191,10 +188,41 @@ async function findSgBinary(): Promise<string | null> {
   return null;
 }
 
+interface AstGrepRunOptions {
+  path?: string;
+  maxResults?: number;
+  context?: number;
+  replacement?: string;
+  dryRun?: boolean;
+}
+
+export function buildAstGrepRunArgs(
+  pattern: string,
+  language: string,
+  options: AstGrepRunOptions,
+): string[] {
+  const args: string[] = ['run', '--pattern', pattern, '--lang', language];
+
+  if (options.replacement) {
+    args.push('--rewrite', options.replacement);
+    if (!options.dryRun) {
+      args.push('--update-all');
+    }
+  } else {
+    args.push('--json');
+  }
+
+  if (options.path) {
+    args.push(options.path);
+  }
+
+  return args;
+}
+
 async function runAstGrep(
   pattern: string,
   language: string,
-  options: { path?: string; maxResults?: number; context?: number; replacement?: string; dryRun?: boolean }
+  options: AstGrepRunOptions
 ): Promise<{ matches: unknown[]; command: string }> {
   const sg = await findSgBinary();
   if (!sg) {
@@ -207,20 +235,7 @@ async function runAstGrep(
     args.push('--yes', '@ast-grep/cli');
   }
 
-  if (options.replacement && !options.dryRun) {
-    // Rewrite mode
-    args.push('run', '--pattern', pattern, '--rewrite', options.replacement, '--lang', language);
-  } else if (options.replacement && options.dryRun) {
-    // Dry run rewrite
-    args.push('run', '--pattern', pattern, '--rewrite', options.replacement, '--lang', language);
-  } else {
-    // Search mode
-    args.push('run', '--pattern', pattern, '--lang', language, '--json');
-  }
-
-  if (options.path) {
-    args.push(options.path);
-  }
+  args.push(...buildAstGrepRunArgs(pattern, language, options));
 
   try {
     const { stdout } = await exec(cmd, args, { timeout: 30000 });
@@ -514,6 +529,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const file = a.file as string;
       const line = a.line as number;
       const char = a.character as number;
+      const includeDeclaration = a.includeDeclaration as boolean | undefined;
+      const effectiveIncludeDeclaration = includeDeclaration !== false;
       if (!file || !line) return errorResult('file and line are required');
       const content = await readFile(file, 'utf-8');
       const lines = content.split('\n');
@@ -542,10 +559,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const match = line.match(/^(.+?):(\d+):(.+)$/);
           if (!match) return null;
           return { file: match[1], line: parseInt(match[2], 10), content: match[3].trim() };
-        }).filter(Boolean);
-        return text({ symbol, referenceCount: refs.length, references: refs.slice(0, 100) });
+        }).filter((entry): entry is { file: string; line: number; content: string } => entry !== null);
+
+        const declarationLines = new Set(
+          extractSymbols(content)
+            .filter((s) => s.name === symbol)
+            .map((s) => s.line)
+        );
+        const normalizedTargetFile = resolve(file);
+        const filteredRefs = effectiveIncludeDeclaration
+          ? refs
+          : refs.filter((ref) => {
+            if (resolve(ref.file) !== normalizedTargetFile) return true;
+            return !declarationLines.has(ref.line);
+          });
+
+        return text({
+          symbol,
+          includeDeclaration: effectiveIncludeDeclaration,
+          referenceCount: filteredRefs.length,
+          references: filteredRefs.slice(0, 100),
+        });
       } catch {
-        return text({ symbol, referenceCount: 0, references: [], note: 'grep search returned no results' });
+        return text({
+          symbol,
+          includeDeclaration: effectiveIncludeDeclaration,
+          referenceCount: 0,
+          references: [],
+          note: 'grep search returned no results',
+        });
       }
     }
 
@@ -606,5 +648,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-const transport = new StdioServerTransport();
-server.connect(transport).catch(console.error);
+if (shouldAutoStartMcpServer('code_intel')) {
+  const transport = new StdioServerTransport();
+  server.connect(transport).catch(console.error);
+}

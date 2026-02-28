@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { execSync } from 'child_process';
 import {
   isAlreadyTriggered,
   writeTriggerMarker,
@@ -17,6 +18,29 @@ function makeTmpDir(): string {
   const dir = join(tmpdir(), `omx-cs-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+function initGitRepo(dir: string): void {
+  execSync('git init', { cwd: dir, stdio: 'ignore' });
+  execSync('git config user.email "omx-test@example.com"', { cwd: dir, stdio: 'ignore' });
+  execSync('git config user.name "OMX Test"', { cwd: dir, stdio: 'ignore' });
+
+  writeFileSync(join(dir, 'tracked.ts'), 'export const tracked = 1;\n', 'utf-8');
+  writeFileSync(join(dir, 'deleted.ts'), 'export const removed = true;\n', 'utf-8');
+  writeFileSync(join(dir, 'rename-old.ts'), 'export const renamed = true;\n', 'utf-8');
+
+  execSync('git add tracked.ts deleted.ts rename-old.ts', { cwd: dir, stdio: 'ignore' });
+  execSync('git commit -m "init"', { cwd: dir, stdio: 'ignore' });
+}
+
+function writeEnabledCodeSimplifierConfig(homeDir: string): void {
+  const configDir = join(homeDir, '.omx');
+  mkdirSync(configDir, { recursive: true });
+  writeFileSync(
+    join(configDir, 'config.json'),
+    JSON.stringify({ codeSimplifier: { enabled: true, maxFiles: 5 } }, null, 2),
+    'utf-8',
+  );
 }
 
 describe('code-simplifier trigger marker', () => {
@@ -111,11 +135,11 @@ describe('getModifiedFiles', () => {
   });
 
   it('filters by extension', () => {
-    // getModifiedFiles calls git internally; test the filter logic indirectly
-    // by checking that calling with empty extensions returns empty
     const dir = makeTmpDir();
     try {
-      const files = getModifiedFiles(dir, [], 10);
+      initGitRepo(dir);
+      writeFileSync(join(dir, 'tracked.ts'), 'export const tracked = 2;\n', 'utf-8');
+      const files = getModifiedFiles(dir, ['.py'], 10);
       assert.deepEqual(files, []);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -125,8 +149,34 @@ describe('getModifiedFiles', () => {
   it('respects maxFiles limit', () => {
     const dir = makeTmpDir();
     try {
-      const files = getModifiedFiles(dir, ['.ts'], 0);
-      assert.deepEqual(files, []);
+      initGitRepo(dir);
+      writeFileSync(join(dir, 'tracked.ts'), 'export const tracked = 2;\n', 'utf-8');
+      writeFileSync(join(dir, 'new-a.ts'), 'export const a = 1;\n', 'utf-8');
+      writeFileSync(join(dir, 'new-b.ts'), 'export const b = 2;\n', 'utf-8');
+      const files = getModifiedFiles(dir, ['.ts'], 2);
+      assert.equal(files.length, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('includes modified and untracked files, excludes deleted and rename-old paths', () => {
+    const dir = makeTmpDir();
+    try {
+      initGitRepo(dir);
+
+      writeFileSync(join(dir, 'tracked.ts'), 'export const tracked = 2;\n', 'utf-8'); // M
+      writeFileSync(join(dir, 'new-file.ts'), 'export const newFile = true;\n', 'utf-8'); // ??
+      execSync('git mv rename-old.ts rename-new.ts', { cwd: dir, stdio: 'ignore' }); // R old -> new
+      execSync('git rm deleted.ts', { cwd: dir, stdio: 'ignore' }); // D
+
+      const files = getModifiedFiles(dir, ['.ts'], 20);
+
+      assert.ok(files.includes('tracked.ts'));
+      assert.ok(files.includes('new-file.ts'));
+      assert.ok(files.includes('rename-new.ts'));
+      assert.ok(!files.includes('deleted.ts'));
+      assert.ok(!files.includes('rename-old.ts'));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -136,34 +186,51 @@ describe('getModifiedFiles', () => {
 describe('processCodeSimplifier', () => {
   let stateDir: string;
   let cwd: string;
+  let homeDir: string;
 
   beforeEach(() => {
     stateDir = makeTmpDir();
     cwd = makeTmpDir();
+    homeDir = makeTmpDir();
   });
 
   afterEach(() => {
     rmSync(stateDir, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
   });
 
   it('returns not triggered when disabled (no config)', () => {
-    // processCodeSimplifier reads ~/.omx/config.json which likely has
-    // codeSimplifier.enabled = false or absent in test environments
-    const result = processCodeSimplifier(cwd, stateDir);
+    // Pass homeDir as configDir — no config file exists there, so disabled.
+    const result = processCodeSimplifier(cwd, stateDir, homeDir);
 
     assert.equal(result.triggered, false);
     assert.equal(result.message, '');
   });
 
-  it('clears marker on second call (cycle prevention)', () => {
-    // Simulate a marker from a previous trigger
-    writeTriggerMarker(stateDir);
+  it('triggers deterministically when enabled config and modified files are present', () => {
+    initGitRepo(cwd);
+    writeEnabledCodeSimplifierConfig(homeDir);
+    writeFileSync(join(cwd, 'tracked.ts'), 'export const changed = 2;\n', 'utf-8');
+
+    const result = processCodeSimplifier(cwd, stateDir, homeDir);
+
+    assert.equal(result.triggered, true);
+    assert.match(result.message, /tracked\.ts/);
+    assert.equal(isAlreadyTriggered(stateDir), true);
+  });
+
+  it('clears marker on second call after a successful trigger (cycle prevention)', () => {
+    initGitRepo(cwd);
+    writeEnabledCodeSimplifierConfig(homeDir);
+    writeFileSync(join(cwd, 'tracked.ts'), 'export const changed = 2;\n', 'utf-8');
+
+    const first = processCodeSimplifier(cwd, stateDir, homeDir);
+    assert.equal(first.triggered, true);
     assert.equal(isAlreadyTriggered(stateDir), true);
 
-    // Even if config is disabled, the marker-clearing logic is tested
-    // by directly checking marker state
-    clearTriggerMarker(stateDir);
+    const second = processCodeSimplifier(cwd, stateDir, homeDir);
+    assert.equal(second.triggered, false);
     assert.equal(isAlreadyTriggered(stateDir), false);
   });
 });

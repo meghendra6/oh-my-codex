@@ -1,8 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { PassThrough } from 'node:stream';
 import {
   buildClientAttachedReconcileHookName,
   assertTeamWorkerCliBinaryAvailable,
+  buildWorkerProcessLaunchSpec,
   buildReconcileHudResizeArgs,
   buildRegisterClientAttachedReconcileArgs,
   buildRegisterResizeHookArgs,
@@ -17,25 +19,31 @@ import {
   chooseTeamLeaderPaneId,
   createTeamSession,
   enableMouseScrolling,
+  isMsysOrGitBash,
   isNativeWindows,
   isTmuxAvailable,
+  translatePathForMsys,
   isWsl2,
   isWorkerAlive,
   killWorker,
   killWorkerByPaneId,
   listTeamSessions,
   resolveTeamWorkerCli,
+  resolveTeamWorkerLaunchMode,
   resolveWorkerCliForSend,
   resolveTeamWorkerCliPlan,
   buildWorkerSubmitPlan,
   sanitizeTeamName,
   shouldAttemptAdaptiveRetry,
   sendToWorker,
+  sendToWorkerStdin,
   sleepFractionalSeconds,
   translateWorkerLaunchArgsForCli,
   waitForWorkerReady,
+  paneIsBootstrapping,
+  dismissTrustPromptIfPresent,
 } from '../tmux-session.js';
-import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_HEIGHT_LINES } from '../../hud/constants.js';
+import { HUD_RESIZE_RECONCILE_DELAY_SECONDS, HUD_TMUX_TEAM_HEIGHT_LINES } from '../../hud/constants.js';
 
 function withEmptyPath<T>(fn: () => T): T {
   const prev = process.env.PATH;
@@ -110,7 +118,7 @@ describe('HUD resize hook command builders', () => {
     assert.equal(args[1], '-t');
     assert.equal(args[2], 'my-session:0');
     assert.match(args[3] ?? '', /^client-resized\[\d+\]$/);
-    assert.equal(args[4], `run-shell -b 'tmux resize-pane -t %1 -y ${HUD_TMUX_HEIGHT_LINES}'`);
+    assert.equal(args[4], `run-shell -b 'tmux resize-pane -t %1 -y ${HUD_TMUX_TEAM_HEIGHT_LINES} >/dev/null 2>&1 || true'`);
   });
 
   it('buildUnregisterResizeHookArgs removes the exact numeric hook slot', () => {
@@ -130,7 +138,10 @@ describe('HUD resize hook command builders', () => {
     assert.equal(args[1], '-t');
     assert.equal(args[2], 'my-session:0');
     assert.match(args[3] ?? '', /^client-attached\[\d+\]$/);
-    assert.match(args[4] ?? '', /^run-shell -b 'tmux resize-pane -t %1 -y \d+; tmux set-hook -u -t my-session:0 client-attached\[\d+\]'$/);
+    assert.match(
+      args[4] ?? '',
+      /^run-shell -b 'tmux resize-pane -t %1 -y \d+ >\/dev\/null 2>&1 \|\| true; tmux set-hook -u -t my-session:0 client-attached\[\d+\]'$/,
+    );
   });
 
   it('buildUnregisterClientAttachedReconcileArgs removes the exact numeric client-attached slot', () => {
@@ -139,17 +150,50 @@ describe('HUD resize hook command builders', () => {
     assert.deepEqual(unregistered, ['set-hook', '-u', '-t', 'my-session:0', registered[3] as string]);
   });
 
+  it('hook indices stay within signed 32-bit range (issue #240)', () => {
+    // buildResizeHookSlot and buildClientAttachedHookSlot must produce indices
+    // in [0, 2147483647) so tmux (signed 32-bit) does not overflow.
+    const longName = 'omx_resize_' + 'a'.repeat(200);
+    const resizeArgs = buildRegisterResizeHookArgs('sess:0', longName, '%1');
+    const attachedArgs = buildRegisterClientAttachedReconcileArgs('sess:0', longName, '%1');
+
+    const resizeSlot = resizeArgs[3] ?? '';
+    const attachedSlot = attachedArgs[3] ?? '';
+
+    const resizeIndex = Number((resizeSlot.match(/\[(\d+)\]/) ?? [])[1]);
+    const attachedIndex = Number((attachedSlot.match(/\[(\d+)\]/) ?? [])[1]);
+
+    assert.ok(resizeIndex >= 0, `resize index must be non-negative, got ${resizeIndex}`);
+    assert.ok(resizeIndex < 2147483647, `resize index must be < 2^31-1, got ${resizeIndex}`);
+    assert.ok(attachedIndex >= 0, `attached index must be non-negative, got ${attachedIndex}`);
+    assert.ok(attachedIndex < 2147483647, `attached index must be < 2^31-1, got ${attachedIndex}`);
+  });
+
+  it('hook indices are deterministic across calls', () => {
+    const name = 'omx_resize_team_session_0_1';
+    const a = buildRegisterResizeHookArgs('s:0', name, '%1');
+    const b = buildRegisterResizeHookArgs('s:0', name, '%1');
+    assert.equal(a[3], b[3]);
+
+    const c = buildRegisterClientAttachedReconcileArgs('s:0', name, '%1');
+    const d = buildRegisterClientAttachedReconcileArgs('s:0', name, '%1');
+    assert.equal(c[3], d[3]);
+  });
+
   it('buildScheduleDelayedHudResizeArgs schedules tmux-side delayed reconcile', () => {
     assert.deepEqual(
       buildScheduleDelayedHudResizeArgs('%1'),
-      ['run-shell', '-b', `sleep ${HUD_RESIZE_RECONCILE_DELAY_SECONDS}; tmux resize-pane -t %1 -y ${HUD_TMUX_HEIGHT_LINES}`],
+      ['run-shell', '-b', `sleep ${HUD_RESIZE_RECONCILE_DELAY_SECONDS}; tmux resize-pane -t %1 -y ${HUD_TMUX_TEAM_HEIGHT_LINES} >/dev/null 2>&1 || true`],
     );
   });
 
-  it('buildReconcileHudResizeArgs is resize-only (no split-window)', () => {
+  it('buildReconcileHudResizeArgs executes a best-effort quiet resize command', () => {
     const args = buildReconcileHudResizeArgs('%7');
-    assert.equal(args.includes('split-window'), false);
-    assert.deepEqual(args, ['resize-pane', '-t', '%7', '-y', String(HUD_TMUX_HEIGHT_LINES)]);
+    assert.equal(args.join(' ').includes('split-window'), false);
+    assert.deepEqual(
+      args,
+      ['run-shell', `tmux resize-pane -t %7 -y ${HUD_TMUX_TEAM_HEIGHT_LINES} >/dev/null 2>&1 || true`],
+    );
   });
 });
 
@@ -254,6 +298,64 @@ describe('shouldAttemptAdaptiveRetry', () => {
   });
 });
 
+describe('paneIsBootstrapping (#391)', () => {
+  it('detects "loading" keyword', () => {
+    assert.equal(paneIsBootstrapping(['loading model weights…']), true);
+  });
+
+  it('detects "model: loading" pattern', () => {
+    assert.equal(paneIsBootstrapping(['gpt-4o', 'model: loading']), true);
+  });
+
+  it('detects "initializing" keyword', () => {
+    assert.equal(paneIsBootstrapping(['Initializing workspace']), true);
+  });
+
+  it('detects "connecting to" keyword', () => {
+    assert.equal(paneIsBootstrapping(['connecting to server']), true);
+  });
+
+  it('returns false for normal ready prompt', () => {
+    assert.equal(paneIsBootstrapping(['› ']), false);
+  });
+
+  it('returns false for status bar without loading', () => {
+    assert.equal(paneIsBootstrapping(['gpt-4o', '50% left', '› ']), false);
+  });
+});
+
+describe('paneLooksReady gate: status-only is not ready (#391)', () => {
+  // These verify the fix for #391: status bar markers alone (gpt-*, % left,
+  // Claude Code v*) must NOT count as ready without a prompt character.
+  // We test indirectly via shouldAttemptAdaptiveRetry since paneLooksReady is
+  // not exported, but the adaptive retry guard calls paneLooksReady internally.
+  it('shouldAttemptAdaptiveRetry returns false for status-only capture (no prompt)', () => {
+    // Capture has Codex status bar but no prompt character — paneLooksReady
+    // should return false, so adaptive retry should also return false.
+    const statusOnlyCapture = 'gpt-4o  50% left';
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, statusOnlyCapture, 'gpt-4o'),
+      false,
+    );
+  });
+
+  it('shouldAttemptAdaptiveRetry returns false for Claude status-only capture', () => {
+    const statusOnlyCapture = 'Claude Code v1.2.3  claude-sonnet-4-20250514';
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, statusOnlyCapture, 'Claude Code'),
+      false,
+    );
+  });
+
+  it('shouldAttemptAdaptiveRetry returns false when pane is bootstrapping', () => {
+    const loadingCapture = 'gpt-4o\nmodel: loading\n› hello';
+    assert.equal(
+      shouldAttemptAdaptiveRetry('auto', true, true, loadingCapture, 'hello'),
+      false,
+    );
+  });
+});
+
 describe('buildWorkerStartupCommand', () => {
   it('auto-selects claude worker CLI from claude model', () => {
     const prevShell = process.env.SHELL;
@@ -264,7 +366,7 @@ describe('buildWorkerStartupCommand', () => {
     process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
     try {
       const cmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'claude-3-7-sonnet']);
-      assert.match(cmd, /exec claude/);
+      assert.match(cmd, /exec .*claude/);
       assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
       assert.doesNotMatch(cmd, /--model/);
       assert.doesNotMatch(cmd, /model_instructions_file=/);
@@ -287,11 +389,11 @@ describe('buildWorkerStartupCommand', () => {
     try {
       process.env.OMX_TEAM_WORKER_CLI = 'codex';
       const codexCmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'claude-3-7-sonnet']);
-      assert.match(codexCmd, /exec codex/);
+      assert.match(codexCmd, /exec .*codex/);
 
       process.env.OMX_TEAM_WORKER_CLI = 'claude';
       const claudeCmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'gpt-5']);
-      assert.match(claudeCmd, /exec claude/);
+      assert.match(claudeCmd, /exec .*claude/);
       assert.equal((claudeCmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
       assert.doesNotMatch(claudeCmd, /--model/);
     } finally {
@@ -318,7 +420,7 @@ describe('buildWorkerStartupCommand', () => {
         {},
         'claude',
       );
-      assert.match(cmd, /exec claude/);
+      assert.match(cmd, /exec .*claude/);
       assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
       assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
       assert.doesNotMatch(cmd, /--model/);
@@ -343,7 +445,7 @@ describe('buildWorkerStartupCommand', () => {
         '-c', 'model_instructions_file="/tmp/custom.md"',
         '--model', 'claude-3-7-sonnet',
       ]);
-      assert.match(cmd, /exec claude/);
+      assert.match(cmd, /exec .*claude/);
       assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
       assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
       assert.doesNotMatch(cmd, /model_instructions_file=/);
@@ -370,7 +472,7 @@ describe('buildWorkerStartupCommand', () => {
     process.argv = [...prevArgv, '--madmax'];
     try {
       const cmd = buildWorkerStartupCommand('alpha', 1);
-      assert.match(cmd, /exec claude/);
+      assert.match(cmd, /exec .*claude/);
       assert.equal((cmd.match(/--dangerously-skip-permissions/g) || []).length, 1);
       assert.doesNotMatch(cmd, /dangerously-bypass-approvals-and-sandbox/);
     } finally {
@@ -394,7 +496,7 @@ describe('buildWorkerStartupCommand', () => {
       assert.match(cmd, /OMX_TEAM_WORKER=alpha\/worker-2/);
       assert.match(cmd, /'\/bin\/zsh' -lc/);
       assert.match(cmd, /source ~\/\.zshrc/);
-      assert.match(cmd, /exec codex/);
+      assert.match(cmd, /exec .*codex/);
     } finally {
       if (typeof prevShell === 'string') process.env.SHELL = prevShell;
       else delete process.env.SHELL;
@@ -411,7 +513,7 @@ describe('buildWorkerStartupCommand', () => {
     try {
       const cmd = buildWorkerStartupCommand('alpha', 1, ['--model', 'gpt-5']);
       assert.match(cmd, /source ~\/\.bashrc/);
-      assert.match(cmd, /exec codex/);
+      assert.match(cmd, /exec .*codex/);
       assert.match(cmd, /--model/);
       assert.match(cmd, /gpt-5/);
     } finally {
@@ -495,7 +597,7 @@ describe('buildWorkerStartupCommand', () => {
     process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
     try {
       const cmd = buildWorkerStartupCommand('alpha', 1, ['-c', 'model_reasoning_effort="xhigh"']);
-      assert.match(cmd, /exec codex/);
+      assert.match(cmd, /exec .*codex/);
       assert.match(cmd, /'-c'/);
       assert.match(cmd, /'model_reasoning_effort=\"xhigh\"'/);
     } finally {
@@ -564,6 +666,33 @@ describe('buildWorkerStartupCommand', () => {
       else delete process.env.SHELL;
       if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
       else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('translates model_instructions_file path for MSYS2/Git Bash environments', () => {
+    const prevShell = process.env.SHELL;
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    const prevInstructions = process.env.OMX_MODEL_INSTRUCTIONS_FILE;
+    const prevMsystem = process.env.MSYSTEM;
+    const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    process.env.SHELL = '/bin/bash';
+    delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT; // default enabled
+    process.env.OMX_MODEL_INSTRUCTIONS_FILE = 'C:\\repo\\AGENTS.md';
+    process.env.MSYSTEM = 'MINGW64';
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const cmd = buildWorkerStartupCommand('alpha', 1, [], 'C:\\repo');
+      assert.match(cmd, /model_instructions_file=\"\/c\/repo\/AGENTS\.md\"/);
+    } finally {
+      if (origPlatform) Object.defineProperty(process, 'platform', origPlatform);
+      if (typeof prevShell === 'string') process.env.SHELL = prevShell;
+      else delete process.env.SHELL;
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+      if (typeof prevInstructions === 'string') process.env.OMX_MODEL_INSTRUCTIONS_FILE = prevInstructions;
+      else delete process.env.OMX_MODEL_INSTRUCTIONS_FILE;
+      if (typeof prevMsystem === 'string') process.env.MSYSTEM = prevMsystem;
+      else delete process.env.MSYSTEM;
     }
   });
 });
@@ -684,6 +813,93 @@ describe('team worker CLI helpers', () => {
   });
 });
 
+describe('team worker launch mode helpers', () => {
+  it('resolveTeamWorkerLaunchMode defaults to interactive and accepts prompt', () => {
+    assert.equal(resolveTeamWorkerLaunchMode({}), 'interactive');
+    assert.equal(resolveTeamWorkerLaunchMode({ OMX_TEAM_WORKER_LAUNCH_MODE: 'interactive' }), 'interactive');
+    assert.equal(resolveTeamWorkerLaunchMode({ OMX_TEAM_WORKER_LAUNCH_MODE: 'prompt' }), 'prompt');
+    assert.equal(resolveTeamWorkerLaunchMode({ OMX_TEAM_WORKER_LAUNCH_MODE: ' PROMPT ' }), 'prompt');
+  });
+
+  it('resolveTeamWorkerLaunchMode rejects unsupported values', () => {
+    assert.throws(
+      () => resolveTeamWorkerLaunchMode({ OMX_TEAM_WORKER_LAUNCH_MODE: 'tmux' }),
+      /Invalid OMX_TEAM_WORKER_LAUNCH_MODE value/i,
+    );
+  });
+
+  it('buildWorkerProcessLaunchSpec returns command/args/env for prompt process spawn', () => {
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const spec = buildWorkerProcessLaunchSpec(
+        'alpha-team',
+        2,
+        ['--model', 'gpt-5.3-codex'],
+        '/tmp/workspace',
+        { OMX_TEAM_STATE_ROOT: '/tmp/workspace/.omx/state' },
+        'codex',
+      );
+      // command is now the resolved absolute path (or bare binary if which fails)
+      assert.equal(spec.workerCli, 'codex');
+      assert.ok(typeof spec.command === 'string' && spec.command.length > 0, 'command must be a non-empty string');
+      assert.deepEqual(spec.args, ['--model', 'gpt-5.3-codex']);
+      assert.equal(spec.env.OMX_TEAM_WORKER, 'alpha-team/worker-2');
+      assert.equal(spec.env.OMX_TEAM_STATE_ROOT, '/tmp/workspace/.omx/state');
+    } finally {
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+
+  it('buildWorkerProcessLaunchSpec includes leader node and CLI path env vars', () => {
+    const prevBypass = process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = '0';
+    try {
+      const spec = buildWorkerProcessLaunchSpec(
+        'beta-team',
+        1,
+        [],
+        '/tmp/workspace',
+        {},
+        'codex',
+      );
+      assert.ok(
+        typeof spec.env.OMX_LEADER_NODE_PATH === 'string' && spec.env.OMX_LEADER_NODE_PATH.length > 0,
+        'OMX_LEADER_NODE_PATH must be set',
+      );
+      assert.ok(
+        typeof spec.env.OMX_LEADER_CLI_PATH === 'string' && spec.env.OMX_LEADER_CLI_PATH.length > 0,
+        'OMX_LEADER_CLI_PATH must be set',
+      );
+      // command matches the resolved CLI path stored in env
+      assert.equal(spec.command, spec.env.OMX_LEADER_CLI_PATH);
+    } finally {
+      if (typeof prevBypass === 'string') process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT = prevBypass;
+      else delete process.env.OMX_BYPASS_DEFAULT_SYSTEM_PROMPT;
+    }
+  });
+});
+
+describe('sendToWorkerStdin', () => {
+  it('writes a newline-terminated trigger message to worker stdin', () => {
+    const stdin = new PassThrough();
+    let captured = '';
+    stdin.on('data', (chunk) => {
+      captured += chunk.toString();
+    });
+
+    sendToWorkerStdin(stdin, 'check inbox now');
+    assert.equal(captured, 'check inbox now\n');
+  });
+
+  it('validates trigger text before writing to stdin', () => {
+    const stdin = new PassThrough();
+    assert.throws(() => sendToWorkerStdin(stdin, ''), /non-empty/i);
+    assert.throws(() => sendToWorkerStdin(stdin, 'a'.repeat(200)), /< 200 characters/i);
+  });
+});
+
 describe('tmux-dependent functions when tmux is unavailable', () => {
   it('isTmuxAvailable returns false', () => {
     withEmptyPath(() => {
@@ -710,6 +926,37 @@ describe('tmux-dependent functions when tmux is unavailable', () => {
     withEmptyPath(() => {
       assert.equal(waitForWorkerReady('omx-team-x', 1, 1), false);
     });
+  });
+});
+
+describe('dismissTrustPromptIfPresent', () => {
+  it('returns false when tmux is unavailable', () => {
+    withEmptyPath(() => {
+      assert.equal(dismissTrustPromptIfPresent('omx-team-x', 1), false);
+    });
+  });
+
+  it('returns false when OMX_TEAM_AUTO_TRUST is disabled', () => {
+    const prev = process.env.OMX_TEAM_AUTO_TRUST;
+    process.env.OMX_TEAM_AUTO_TRUST = '0';
+    try {
+      assert.equal(dismissTrustPromptIfPresent('omx-team-x', 1), false);
+    } finally {
+      if (typeof prev === 'string') process.env.OMX_TEAM_AUTO_TRUST = prev;
+      else delete process.env.OMX_TEAM_AUTO_TRUST;
+    }
+  });
+
+  it('returns false when OMX_TEAM_AUTO_TRUST is unset (auto-trust enabled) but tmux unavailable', () => {
+    const prev = process.env.OMX_TEAM_AUTO_TRUST;
+    delete process.env.OMX_TEAM_AUTO_TRUST;
+    try {
+      withEmptyPath(() => {
+        assert.equal(dismissTrustPromptIfPresent('omx-team-x', 1), false);
+      });
+    } finally {
+      if (typeof prev === 'string') process.env.OMX_TEAM_AUTO_TRUST = prev;
+    }
   });
 });
 
@@ -766,6 +1013,47 @@ describe('isWsl2', () => {
   });
 });
 
+describe('isMsysOrGitBash', () => {
+  it('returns true on win32 when MSYSTEM is set', () => {
+    assert.equal(isMsysOrGitBash({ MSYSTEM: 'MINGW64' }, 'win32'), true);
+  });
+
+  it('returns true on win32 when OSTYPE indicates msys/mingw', () => {
+    assert.equal(isMsysOrGitBash({ OSTYPE: 'msys' }, 'win32'), true);
+    assert.equal(isMsysOrGitBash({ OSTYPE: 'mingw64' }, 'win32'), true);
+  });
+
+  it('returns false outside win32', () => {
+    assert.equal(isMsysOrGitBash({ MSYSTEM: 'MINGW64' }, 'linux'), false);
+  });
+});
+
+describe('translatePathForMsys', () => {
+  it('returns original path outside MSYS2/Git Bash', () => {
+    assert.equal(translatePathForMsys('C:\\repo\\AGENTS.md', {}, 'linux'), 'C:\\repo\\AGENTS.md');
+  });
+
+  it('uses cygpath translation when available', () => {
+    const translated = translatePathForMsys(
+      'C:\\repo\\AGENTS.md',
+      { MSYSTEM: 'MINGW64' },
+      'win32',
+      () => ({ status: 0, stdout: '/c/repo/AGENTS.md\n', stderr: '', error: undefined, output: [] as string[] }) as any,
+    );
+    assert.equal(translated, '/c/repo/AGENTS.md');
+  });
+
+  it('falls back gracefully when cygpath is unavailable', () => {
+    const translated = translatePathForMsys(
+      'C:\\repo\\AGENTS.md',
+      { MSYSTEM: 'MINGW64' },
+      'win32',
+      () => ({ status: 1, stdout: '', stderr: 'not found', error: Object.assign(new Error('ENOENT'), { code: 'ENOENT' }), output: [] as string[] }) as any,
+    );
+    assert.equal(translated, '/c/repo/AGENTS.md');
+  });
+});
+
 describe('isNativeWindows', () => {
   it('returns true when process.platform is win32 and not WSL2', () => {
     const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -796,6 +1084,20 @@ describe('isNativeWindows', () => {
       if (origPlatform) Object.defineProperty(process, 'platform', origPlatform);
       if (typeof prevDistro === 'string') process.env.WSL_DISTRO_NAME = prevDistro;
       else delete process.env.WSL_DISTRO_NAME;
+    }
+  });
+
+  it('returns false on win32 when MSYS2/Git Bash is detected', () => {
+    const origPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    const prevMsystem = process.env.MSYSTEM;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    process.env.MSYSTEM = 'MINGW64';
+    try {
+      assert.equal(isNativeWindows(), false);
+    } finally {
+      if (origPlatform) Object.defineProperty(process, 'platform', origPlatform);
+      if (typeof prevMsystem === 'string') process.env.MSYSTEM = prevMsystem;
+      else delete process.env.MSYSTEM;
     }
   });
 

@@ -121,7 +121,7 @@ describe('omx doctor --team', () => {
     }
   });
 
-  it('prints orphan_tmux_session when tmux session exists without matching team state', async () => {
+  it('prints orphan_tmux_session as warning when tmux session cannot be attributed', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-doctor-team-'));
     try {
       const fakeBin = join(wd, 'bin');
@@ -132,8 +132,9 @@ describe('omx doctor --team', () => {
 
       const res = runOmx(wd, ['doctor', '--team'], { PATH: `${fakeBin}:${process.env.PATH || ''}` });
       if (shouldSkipForSpawnPermissions(res.error)) return;
-      assert.equal(res.status, 1, res.stderr || res.stdout);
+      assert.equal(res.status, 0, res.stderr || res.stdout);
       assert.match(res.stdout, /orphan_tmux_session/);
+      assert.match(res.stdout, /possibly external project/);
     } finally {
       await rm(wd, { recursive: true, force: true });
     }

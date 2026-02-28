@@ -14,6 +14,7 @@
  *   auto-nudge.js      – stall-pattern detection and auto-nudge
  *   linked-sync.js     – linked ralph/team terminal sync
  *   tmux-injection.js  – tmux prompt injection
+ *   team-dispatch.js   – durable team dispatch queue consumer
  *   team-leader-nudge.js – leader mailbox nudge
  *   team-worker.js     – worker heartbeat and idle notification
  */
@@ -36,6 +37,7 @@ import {
   readdir,
 } from './notify-hook/state-io.js';
 import { isLeaderStale, resolveLeaderStalenessThresholdMs, maybeNudgeTeamLeader } from './notify-hook/team-leader-nudge.js';
+import { drainPendingTeamDispatch } from './notify-hook/team-dispatch.js';
 import { syncLinkedRalphOnTeamTerminal } from './notify-hook/linked-sync.js';
 import { handleTmuxInjection } from './notify-hook/tmux-injection.js';
 import { maybeAutoNudge, resolveNudgePaneTarget } from './notify-hook/auto-nudge.js';
@@ -44,6 +46,7 @@ import {
   resolveTeamStateDirForWorker,
   updateWorkerHeartbeat,
   maybeNotifyLeaderAllWorkersIdle,
+  maybeNotifyLeaderWorkerIdle,
 } from './notify-hook/team-worker.js';
 import { DEFAULT_MARKER } from './tmux-hook-engine.js';
 
@@ -129,8 +132,27 @@ async function main() {
           const statePath = join(scopedDir, f);
           const state = JSON.parse(await readFile(statePath, 'utf-8'));
           if (state.active) {
-            state.iteration = (state.iteration || 0) + 1;
-            state.last_turn_at = new Date().toISOString();
+            const nowIso = new Date().toISOString();
+            const nextIteration = (state.iteration || 0) + 1;
+            state.iteration = nextIteration;
+            state.last_turn_at = nowIso;
+
+            const maxIterations = asNumber(state.max_iterations);
+            if (maxIterations !== null && maxIterations > 0 && nextIteration >= maxIterations) {
+              state.active = false;
+              if (typeof state.current_phase !== 'string' || !state.current_phase.trim()) {
+                state.current_phase = 'complete';
+              } else if (!['cancelled', 'failed', 'complete'].includes(state.current_phase)) {
+                state.current_phase = 'complete';
+              }
+              if (typeof state.completed_at !== 'string' || !state.completed_at) {
+                state.completed_at = nowIso;
+              }
+              if (typeof state.stop_reason !== 'string' || !state.stop_reason) {
+                state.stop_reason = 'max_iterations_reached';
+              }
+            }
+
             await writeFile(statePath, JSON.stringify(state, null, 2));
           }
         }
@@ -248,6 +270,15 @@ async function main() {
     }
   }
 
+  // 4.55. Notify leader when individual worker transitions to idle (worker session only)
+  if (isTeamWorker && parsedTeamWorker) {
+    try {
+      await maybeNotifyLeaderWorkerIdle({ cwd, stateDir, logsDir, parsedTeamWorker });
+    } catch {
+      // Non-critical
+    }
+  }
+
   // 4.6. Notify leader when all workers are idle (worker session only)
   if (isTeamWorker && parsedTeamWorker) {
     try {
@@ -262,6 +293,15 @@ async function main() {
   if (!isTeamWorker) {
     try {
       await handleTmuxInjection({ payload, cwd, stateDir, logsDir });
+    } catch {
+      // Non-critical
+    }
+  }
+
+  // 5.5. Opportunistic team dispatch drain (leader session only).
+  if (!isTeamWorker) {
+    try {
+      await drainPendingTeamDispatch({ cwd, stateDir, logsDir, maxPerTick: 5 });
     } catch {
       // Non-critical
     }
@@ -300,6 +340,7 @@ async function main() {
   if (!isTeamWorker) {
     try {
       const { notifyLifecycle } = await import('../dist/notifications/index.js');
+      const { shouldSendIdleNotification, recordIdleNotificationSent } = await import('../dist/notifications/idle-cooldown.js');
       const sessionJsonPath = join(stateDir, 'session.json');
       let notifySessionId = '';
       try {
@@ -307,11 +348,14 @@ async function main() {
         notifySessionId = safeString(sessionData && sessionData.session_id ? sessionData.session_id : '');
       } catch { /* no session file */ }
 
-      if (notifySessionId) {
-        await notifyLifecycle('session-idle', {
+      if (notifySessionId && shouldSendIdleNotification(stateDir, notifySessionId)) {
+        const idleResult = await notifyLifecycle('session-idle', {
           sessionId: notifySessionId,
           projectPath: cwd,
         });
+        if (idleResult && idleResult.anySuccess) {
+          recordIdleNotificationSent(stateDir, notifySessionId);
+        }
         try {
           const { buildNativeHookEvent } = await import('../dist/hooks/extensibility/events.js');
           const { dispatchHookEvent } = await import('../dist/hooks/extensibility/dispatcher.js');
@@ -332,6 +376,24 @@ async function main() {
     } catch {
       // Non-fatal: notification module may not be built or config may not exist
     }
+  }
+
+  // 8.5. Skill activation tracking: update skill-active-state.json when a keyword is detected.
+  try {
+    const { recordSkillActivation } = await import('../dist/hooks/keyword-detector.js');
+    const inputMessages = normalizeInputMessages(payload);
+    const latestUserInput = safeString(inputMessages.length > 0 ? inputMessages[inputMessages.length - 1] : '');
+    if (latestUserInput) {
+      await recordSkillActivation({
+        stateDir,
+        text: latestUserInput,
+        sessionId: payloadSessionId,
+        threadId: safeString(payload['thread-id'] || payload.thread_id || ''),
+        turnId: safeString(payload['turn-id'] || payload.turn_id || ''),
+      });
+    }
+  } catch {
+    // Non-fatal: keyword detector module may not be built yet
   }
 
   // 9. Auto-nudge: detect Codex stall patterns and automatically send a continuation prompt.

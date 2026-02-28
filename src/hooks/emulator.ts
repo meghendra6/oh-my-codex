@@ -21,6 +21,8 @@
  * - OMX: AGENTS.md instructs model -> model self-detects keyword -> model loads skill
  */
 
+import { KEYWORD_TRIGGER_DEFINITIONS } from './keyword-registry.js';
+
 /**
  * Hook event types (for compatibility with OMC concepts)
  */
@@ -94,29 +96,16 @@ export const HOOK_MAPPING: Record<HookEvent, {
  * Keyword detection configuration (embedded in AGENTS.md)
  * Instead of external hook detection, the model is instructed to self-detect
  */
-export const KEYWORD_TRIGGERS: Record<string, string> = {
-  'autopilot': 'Activate autopilot skill for autonomous execution',
-  'ralph': 'Activate ralph persistence loop with verification',
-  'ultrawork': 'Activate ultrawork parallel execution mode',
-  'ulw': 'Activate ultrawork parallel execution mode',
-  'ecomode': 'Activate ecomode for token-efficient execution',
-  'eco': 'Activate ecomode for token-efficient execution',
-  'plan': 'Activate planning skill',
-  'ralplan': 'Activate consensus planning (planner + architect + critic)',
-  'team': 'Activate coordinated team mode',
-  'coordinated team': 'Activate coordinated team mode',
-  'swarm': 'Activate coordinated team mode (swarm is a compatibility alias for team)',
-  'coordinated swarm': 'Activate coordinated team mode (swarm is a compatibility alias for team)',
-  'research': 'Activate parallel research mode',
-  'cancel': 'Cancel active execution modes',
-};
+export const KEYWORD_TRIGGERS: Record<string, string> = Object.fromEntries(
+  KEYWORD_TRIGGER_DEFINITIONS.map(({ keyword, guidance }) => [keyword, guidance]),
+);
 
 /**
  * Generate the keyword detection section for AGENTS.md
  */
 export function generateKeywordDetectionSection(): string {
-  const lines = Object.entries(KEYWORD_TRIGGERS)
-    .map(([keyword, action]) => `- When user says "${keyword}": ${action}`)
+  const lines = KEYWORD_TRIGGER_DEFINITIONS
+    .map(({ keyword, guidance }) => `- When user says "${keyword}": ${guidance}`)
     .join('\n');
 
   return `
@@ -124,8 +113,15 @@ export function generateKeywordDetectionSection(): string {
 When you see these keywords in user messages, activate the corresponding skill:
 ${lines}
 
+Ralplan-first execution gate:
+- Before implementation/tool execution, ensure both artifacts exist in \`.omx/plans/\`: \`prd-*.md\` and \`test-spec-*.md\`.
+- If ralph is active and either artifact is missing, stay in planning mode and do not execute implementation tools.
+- Only begin implementation after the planning gate is complete.
+
 To activate a skill, use the corresponding slash command or invoke the skill directly.
 If a keyword is detected, announce the activation to the user before proceeding.
+
+Pre-execution gate: When an execution keyword (ralph, autopilot, team, ultrawork) is detected but the prompt lacks specific files, functions, issue numbers, or structured steps, redirect to $ralplan for scoping before execution. User can bypass with "force:" or "!" prefix.
 </keyword_detection>
 `;
 }

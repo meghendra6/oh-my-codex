@@ -9,6 +9,19 @@ describe('MCP state/team tools path traversal prevention', () => {
   // Disable auto-start so tests can import the module directly
   process.env.OMX_STATE_SERVER_DISABLE_AUTO_START = '1';
 
+  it('rejects invalid workingDirectory inputs containing NUL bytes', async () => {
+    const { handleStateToolCall } = await import('../state-server.js');
+    const resp = await handleStateToolCall({
+      params: {
+        name: 'state_read',
+        arguments: { mode: 'team', workingDirectory: 'bad\0path' },
+      },
+    });
+    assert.equal(resp.isError, true, 'Expected isError=true for invalid workingDirectory');
+    const body = JSON.parse(resp.content[0]?.text ?? '{}') as { error?: string };
+    assert.match(body.error || '', /NUL byte/);
+  });
+
   it('rejects traversal in team_name for team_read_config', async () => {
     const { handleStateToolCall } = await import('../state-server.js');
     const wd = await mkdtemp(join(tmpdir(), 'omx-traversal-'));
@@ -22,6 +35,49 @@ describe('MCP state/team tools path traversal prevention', () => {
       assert.equal(resp.isError, true, 'Expected isError=true for team_name traversal');
       const body = JSON.parse(resp.content[0]?.text ?? '{}') as { error?: string };
       assert.ok(typeof body.error === 'string' && body.error.length > 0, 'Expected error message in response');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects traversal in mode for state_write', async () => {
+    const { handleStateToolCall } = await import('../state-server.js');
+    const wd = await mkdtemp(join(tmpdir(), 'omx-traversal-'));
+    try {
+      const resp = await handleStateToolCall({
+        params: {
+          name: 'state_write',
+          arguments: {
+            mode: '../../outside',
+            state: { active: true },
+            workingDirectory: wd,
+          },
+        },
+      });
+      assert.equal(resp.isError, true, 'Expected isError=true for mode traversal');
+      const body = JSON.parse(resp.content[0]?.text ?? '{}') as { error?: string };
+      assert.ok(typeof body.error === 'string' && body.error.length > 0, 'Expected error message in response');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unsupported mode names for state_read', async () => {
+    const { handleStateToolCall } = await import('../state-server.js');
+    const wd = await mkdtemp(join(tmpdir(), 'omx-traversal-'));
+    try {
+      const resp = await handleStateToolCall({
+        params: {
+          name: 'state_read',
+          arguments: {
+            mode: 'custom_mode',
+            workingDirectory: wd,
+          },
+        },
+      });
+      assert.equal(resp.isError, true, 'Expected isError=true for unsupported mode');
+      const body = JSON.parse(resp.content[0]?.text ?? '{}') as { error?: string };
+      assert.ok(typeof body.error === 'string' && body.error.includes('mode must be one of'));
     } finally {
       await rm(wd, { recursive: true, force: true });
     }

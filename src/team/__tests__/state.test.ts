@@ -16,6 +16,7 @@ import {
   listTasks,
   migrateV1ToV2,
   readTask,
+  readTeamConfig,
   readTeamManifestV2,
   transitionTaskStatus,
   releaseTaskClaim,
@@ -32,6 +33,13 @@ import {
   updateWorkerHeartbeat,
   writeAtomic,
   writeWorkerInbox,
+  enqueueDispatchRequest,
+  listDispatchRequests,
+  markDispatchRequestNotified,
+  markDispatchRequestDelivered,
+  transitionDispatchRequest,
+  readDispatchRequest,
+  resolveDispatchLockTimeoutMs,
 } from '../state.js';
 
 describe('team state', () => {
@@ -95,6 +103,117 @@ describe('team state', () => {
     }
   });
 
+  it('normalizes legacy manifest policy with dispatch defaults and timeout bounds', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-manifest-policy-'));
+    try {
+      await initTeamState('team-policy', 't', 'executor', 1, cwd);
+      const manifestPath = join(cwd, '.omx', 'state', 'team', 'team-policy', 'manifest.v2.json');
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+      const policy = (manifest.policy ?? {}) as Record<string, unknown>;
+      delete policy.dispatch_mode;
+      policy.dispatch_ack_timeout_ms = 999_999;
+      manifest.policy = policy;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
+
+      const loaded = await readTeamManifestV2('team-policy', cwd);
+      assert.equal(loaded?.policy.dispatch_mode, 'hook_preferred_with_fallback');
+      assert.equal(loaded?.policy.dispatch_ack_timeout_ms, 10_000);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatch request store enqueues, dedupes, and transitions idempotently', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-dispatch-store-'));
+    try {
+      await initTeamState('team-dispatch', 't', 'executor', 1, cwd);
+      const first = await enqueueDispatchRequest(
+        'team-dispatch',
+        {
+          kind: 'mailbox',
+          to_worker: 'worker-1',
+          message_id: 'msg-1',
+          trigger_message: 'check mailbox',
+        },
+        cwd,
+      );
+      assert.equal(first.deduped, false);
+
+      const dup = await enqueueDispatchRequest(
+        'team-dispatch',
+        {
+          kind: 'mailbox',
+          to_worker: 'worker-1',
+          message_id: 'msg-1',
+          trigger_message: 'check mailbox',
+        },
+        cwd,
+      );
+      assert.equal(dup.deduped, true);
+      assert.equal(dup.request.request_id, first.request.request_id);
+
+      const notified = await markDispatchRequestNotified('team-dispatch', first.request.request_id, {}, cwd);
+      assert.equal(notified?.status, 'notified');
+      const notifiedAgain = await markDispatchRequestNotified('team-dispatch', first.request.request_id, {}, cwd);
+      assert.equal(notifiedAgain?.status, 'notified');
+      const delivered = await markDispatchRequestDelivered('team-dispatch', first.request.request_id, {}, cwd);
+      assert.equal(delivered?.status, 'delivered');
+      const listed = await listDispatchRequests('team-dispatch', cwd);
+      assert.equal(listed.length, 1);
+      assert.equal(listed[0]?.message_id, 'msg-1');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatch request store allows failed->failed reason patch and blocks failed->notified', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-dispatch-store-failed-'));
+    try {
+      await initTeamState('team-dispatch-failed', 't', 'executor', 1, cwd);
+      const queued = await enqueueDispatchRequest(
+        'team-dispatch-failed',
+        {
+          kind: 'inbox',
+          to_worker: 'worker-1',
+          trigger_message: 'ping',
+        },
+        cwd,
+      );
+      await transitionDispatchRequest(
+        'team-dispatch-failed',
+        queued.request.request_id,
+        'pending',
+        'failed',
+        { last_reason: 'initial_failure' },
+        cwd,
+      );
+
+      const invalidNotified = await markDispatchRequestNotified(
+        'team-dispatch-failed',
+        queued.request.request_id,
+        { last_reason: 'should_not_transition' },
+        cwd,
+      );
+      assert.equal(invalidNotified, null);
+
+      const patched = await transitionDispatchRequest(
+        'team-dispatch-failed',
+        queued.request.request_id,
+        'failed',
+        'failed',
+        { last_reason: 'fallback_confirmed_after_failed_receipt:tmux_send_keys_sent' },
+        cwd,
+      );
+      assert.equal(patched?.status, 'failed');
+      assert.equal(patched?.last_reason, 'fallback_confirmed_after_failed_receipt:tmux_send_keys_sent');
+      const reread = await readDispatchRequest('team-dispatch-failed', queued.request.request_id, cwd);
+      assert.equal(reread?.status, 'failed');
+      assert.equal(reread?.last_reason, 'fallback_confirmed_after_failed_receipt:tmux_send_keys_sent');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('initTeamState persists workspace metadata to config + manifest', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-team-metadata-'));
     try {
@@ -127,6 +246,56 @@ describe('team state', () => {
       assert.equal(manifest?.resize_hook_target, null);
     } finally {
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves task/mailbox/approval paths under explicit OMX_TEAM_STATE_ROOT from a worker cwd (worker-env contamination regression)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'omx-team-explicit-root-'));
+    const leaderCwd = join(root, 'leader');
+    const workerCwd = join(root, 'worker-worktree');
+    const explicitStateRoot = join(leaderCwd, '.omx', 'state');
+    const prevRoot = process.env.OMX_TEAM_STATE_ROOT;
+    try {
+      await mkdir(leaderCwd, { recursive: true });
+      await mkdir(workerCwd, { recursive: true });
+      await initTeamState('team-explicit-root', 't', 'executor', 1, leaderCwd);
+      process.env.OMX_TEAM_STATE_ROOT = explicitStateRoot;
+
+      const task = await createTask(
+        'team-explicit-root',
+        { subject: 'explicit root task', description: 'regression guard', status: 'pending' },
+        workerCwd,
+      );
+      const claim = await claimTask('team-explicit-root', task.id, 'worker-1', task.version ?? 1, workerCwd);
+      assert.equal(claim.ok, true);
+
+      await sendDirectMessage('team-explicit-root', 'worker-1', 'leader-fixed', 'hello from worker cwd', workerCwd);
+      const messages = await listMailboxMessages('team-explicit-root', 'leader-fixed', workerCwd);
+      assert.equal(messages.length, 1);
+      assert.equal(messages[0]?.body, 'hello from worker cwd');
+
+      const approvalRecord = {
+        task_id: task.id,
+        required: true,
+        status: 'approved' as const,
+        reviewer: 'leader-fixed',
+        decision_reason: 'path guard uses resolved team state root',
+        decided_at: new Date().toISOString(),
+      };
+      await writeTaskApproval('team-explicit-root', approvalRecord, workerCwd);
+      const approval = await readTaskApproval('team-explicit-root', task.id, workerCwd);
+      assert.equal(approval?.status, 'approved');
+      assert.equal(approval?.reviewer, 'leader-fixed');
+
+      const explicitTeamRoot = join(explicitStateRoot, 'team', 'team-explicit-root');
+      assert.equal(existsSync(join(explicitTeamRoot, 'tasks', `task-${task.id}.json`)), true);
+      assert.equal(existsSync(join(explicitTeamRoot, 'mailbox', 'leader-fixed.json')), true);
+      assert.equal(existsSync(join(explicitTeamRoot, 'approvals', `task-${task.id}.json`)), true);
+      assert.equal(existsSync(join(workerCwd, '.omx', 'state', 'team', 'team-explicit-root')), false);
+    } finally {
+      if (typeof prevRoot === 'string') process.env.OMX_TEAM_STATE_ROOT = prevRoot;
+      else delete process.env.OMX_TEAM_STATE_ROOT;
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -1182,6 +1351,7 @@ describe('team state', () => {
         {
           ...process.env,
           OMX_TEAM_DISPLAY_MODE: 'tmux',
+          OMX_TEAM_WORKER_LAUNCH_MODE: 'prompt',
           CODEX_APPROVAL_MODE: 'on-request',
           CODEX_SANDBOX_MODE: 'workspace-write',
           CODEX_NETWORK_ACCESS: '0',
@@ -1190,12 +1360,39 @@ describe('team state', () => {
       );
 
       const manifest = await readTeamManifestV2('team-env', cwd);
+      const config = await readTeamConfig('team-env', cwd);
       assert.ok(manifest);
+      assert.ok(config);
       assert.equal(manifest?.policy.display_mode, 'split_pane');
+      assert.equal(manifest?.policy.worker_launch_mode, 'prompt');
+      assert.equal(config?.worker_launch_mode, 'prompt');
       assert.equal(manifest?.permissions_snapshot.approval_mode, 'on-request');
       assert.equal(manifest?.permissions_snapshot.sandbox_mode, 'workspace-write');
       assert.equal(manifest?.permissions_snapshot.network_access, false);
       assert.equal(manifest?.leader.session_id, 'session-xyz');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('initTeamState rejects invalid OMX_TEAM_WORKER_LAUNCH_MODE values', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-team-state-'));
+    try {
+      await assert.rejects(
+        () => initTeamState(
+          'team-env-invalid',
+          't',
+          'executor',
+          1,
+          cwd,
+          DEFAULT_MAX_WORKERS,
+          {
+            ...process.env,
+            OMX_TEAM_WORKER_LAUNCH_MODE: 'tmux',
+          },
+        ),
+        /Invalid OMX_TEAM_WORKER_LAUNCH_MODE value/i,
+      );
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -1208,6 +1405,56 @@ describe('team state', () => {
       const result = await claimTask('team-x', 'non-existent-999', 'worker-1', null, cwd);
       assert.equal(result.ok, false);
       assert.equal((result as { ok: false; error: string }).error, 'task_not_found');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('resolveDispatchLockTimeoutMs returns default when env not set', () => {
+    assert.equal(resolveDispatchLockTimeoutMs({}), 15_000);
+    assert.equal(resolveDispatchLockTimeoutMs({ OMX_DISPATCH_LOCK_TIMEOUT_MS: '' }), 15_000);
+    assert.equal(resolveDispatchLockTimeoutMs({ OMX_DISPATCH_LOCK_TIMEOUT_MS: 'not-a-number' }), 15_000);
+  });
+
+  it('resolveDispatchLockTimeoutMs reads from env and clamps to bounds', () => {
+    // Reads value from env
+    assert.equal(resolveDispatchLockTimeoutMs({ OMX_DISPATCH_LOCK_TIMEOUT_MS: '30000' }), 30_000);
+    // Clamps to minimum
+    assert.equal(resolveDispatchLockTimeoutMs({ OMX_DISPATCH_LOCK_TIMEOUT_MS: '0' }), 1_000);
+    assert.equal(resolveDispatchLockTimeoutMs({ OMX_DISPATCH_LOCK_TIMEOUT_MS: '-500' }), 1_000);
+    // Clamps to maximum
+    assert.equal(resolveDispatchLockTimeoutMs({ OMX_DISPATCH_LOCK_TIMEOUT_MS: '999999' }), 120_000);
+    // Floors non-integer
+    assert.equal(resolveDispatchLockTimeoutMs({ OMX_DISPATCH_LOCK_TIMEOUT_MS: '5000.9' }), 5_000);
+  });
+
+  it('dispatch lock error message includes timeout hint', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'omx-dispatch-lock-timeout-'));
+    try {
+      await initTeamState('team-lock-hint', 'task', 'executor', 1, cwd);
+      // Hold the lock by creating the lock directory manually
+      const lockDir = join(cwd, '.omx', 'state', 'team', 'team-lock-hint', 'dispatch', '.lock');
+      await mkdir(lockDir, { recursive: true });
+
+      // Use a very short timeout via env override so the test is fast
+      const origEnv = process.env.OMX_DISPATCH_LOCK_TIMEOUT_MS;
+      process.env.OMX_DISPATCH_LOCK_TIMEOUT_MS = '1000';
+      try {
+        await assert.rejects(
+          () => enqueueDispatchRequest('team-lock-hint', { kind: 'inbox', to_worker: 'worker-1', trigger_message: 'test' }, cwd),
+          (err: Error) => {
+            assert.ok(err.message.includes('OMX_DISPATCH_LOCK_TIMEOUT_MS'), `Expected hint in error, got: ${err.message}`);
+            return true;
+          }
+        );
+      } finally {
+        if (origEnv === undefined) {
+          delete process.env.OMX_DISPATCH_LOCK_TIMEOUT_MS;
+        } else {
+          process.env.OMX_DISPATCH_LOCK_TIMEOUT_MS = origEnv;
+        }
+        await rm(lockDir, { recursive: true, force: true });
+      }
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

@@ -24,12 +24,22 @@ interface SetupOptions {
   dryRun?: boolean;
   scope?: SetupScope;
   verbose?: boolean;
+  agentsOverwritePrompt?: () => Promise<boolean>;
 }
 
-export const SETUP_SCOPES = ['user', 'project-local', 'project'] as const;
+/**
+ * Legacy scope values that may appear in persisted setup-scope.json files.
+ * Both 'project-local' (renamed) and old 'project' (minimal, removed) are
+ * migrated to the current 'project' scope on read.
+ */
+const LEGACY_SCOPE_MIGRATION: Record<string, 'project'> = {
+  'project-local': 'project',
+};
+
+export const SETUP_SCOPES = ['user', 'project'] as const;
 export type SetupScope = typeof SETUP_SCOPES[number];
 
-interface ScopeDirectories {
+export interface ScopeDirectories {
   codexConfigFile: string;
   codexHomeDir: string;
   nativeAgentsDir: string;
@@ -38,7 +48,7 @@ interface ScopeDirectories {
 }
 
 function applyScopePathRewritesToAgentsTemplate(content: string, scope: SetupScope): string {
-  if (scope !== 'project-local') return content;
+  if (scope !== 'project') return content;
   return content
     .replaceAll('~/.codex', './.codex')
     .replaceAll('~/.agents', './.agents');
@@ -70,8 +80,8 @@ function getScopeFilePath(projectRoot: string): string {
   return join(projectRoot, '.omx', 'setup-scope.json');
 }
 
-function resolveScopeDirectories(scope: SetupScope, projectRoot: string): ScopeDirectories {
-  if (scope === 'project-local') {
+export function resolveScopeDirectories(scope: SetupScope, projectRoot: string): ScopeDirectories {
+  if (scope === 'project') {
     const codexHomeDir = join(projectRoot, '.codex');
     return {
       codexConfigFile: join(codexHomeDir, 'config.toml'),
@@ -96,8 +106,18 @@ async function readPersistedSetupScope(projectRoot: string): Promise<SetupScope 
   try {
     const raw = await readFile(scopePath, 'utf-8');
     const parsed = JSON.parse(raw) as Partial<PersistedSetupScope>;
-    if (parsed && typeof parsed.scope === 'string' && isSetupScope(parsed.scope)) {
-      return parsed.scope;
+    if (parsed && typeof parsed.scope === 'string') {
+      // Direct match to current scopes
+      if (isSetupScope(parsed.scope)) return parsed.scope;
+      // Migrate legacy scope values (project-local → project)
+      const migrated = LEGACY_SCOPE_MIGRATION[parsed.scope];
+      if (migrated) {
+        console.warn(
+          `[omx] Migrating persisted setup scope "${parsed.scope}" → "${migrated}" ` +
+          `(see issue #243: simplified to user/project).`
+        );
+        return migrated;
+      }
     }
   } catch {
     // ignore invalid persisted scope and fall back to prompt/default
@@ -115,13 +135,29 @@ async function promptForSetupScope(defaultScope: SetupScope): Promise<SetupScope
   });
   try {
     console.log('Select setup scope:');
-    console.log(`  1) user (default)`);
-    console.log('  2) project-local');
-    console.log('  3) project');
-    const answer = (await rl.question('Scope [1-3] (default: 1): ')).trim().toLowerCase();
-    if (answer === '2' || answer === 'project-local') return 'project-local';
-    if (answer === '3' || answer === 'project') return 'project';
+    console.log(`  1) user (default) — installs to ~/.codex, ~/.agents`);
+    console.log('  2) project — installs to ./.codex, ./.agents (local to project)');
+    const answer = (await rl.question('Scope [1-2] (default: 1): ')).trim().toLowerCase();
+    if (answer === '2' || answer === 'project') return 'project';
     return defaultScope;
+  } finally {
+    rl.close();
+  }
+}
+
+async function promptForAgentsOverwrite(): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return false;
+  }
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = (await rl.question('AGENTS.md already exists. Overwrite with template? [y/N]: '))
+      .trim()
+      .toLowerCase();
+    return answer === 'y' || answer === 'yes';
   } finally {
     rl.close();
   }
@@ -159,12 +195,17 @@ async function persistSetupScope(
 }
 
 export async function setup(options: SetupOptions = {}): Promise<void> {
-  const { force = false, dryRun = false, scope: requestedScope, verbose = false } = options;
+  const {
+    force = false,
+    dryRun = false,
+    scope: requestedScope,
+    verbose = false,
+    agentsOverwritePrompt,
+  } = options;
   const pkgRoot = getPackageRoot();
   const projectRoot = process.cwd();
   const resolvedScope = await resolveSetupScope(projectRoot, requestedScope);
   const scopeDirs = resolveScopeDirectories(resolvedScope.scope, projectRoot);
-  const installUserOrProjectLocalAssets = resolvedScope.scope !== 'project';
   const scopeSourceMessage = resolvedScope.source === 'persisted' ? ' (from .omx/setup-scope.json)' : '';
 
   console.log('oh-my-codex setup');
@@ -174,18 +215,14 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
   // Step 1: Ensure directories exist
   console.log('[1/8] Creating directories...');
   const dirs = [
+    scopeDirs.codexHomeDir,
+    scopeDirs.promptsDir,
+    scopeDirs.skillsDir,
+    scopeDirs.nativeAgentsDir,
     omxStateDir(projectRoot),
     omxPlansDir(projectRoot),
     omxLogsDir(projectRoot),
   ];
-  if (installUserOrProjectLocalAssets) {
-    dirs.unshift(
-      scopeDirs.codexHomeDir,
-      scopeDirs.promptsDir,
-      scopeDirs.skillsDir,
-      scopeDirs.nativeAgentsDir
-    );
-  }
   for (const dir of dirs) {
     if (!dryRun) {
       await mkdir(dir, { recursive: true });
@@ -198,7 +235,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
   // Step 2: Install agent prompts
   console.log('[2/8] Installing agent prompts...');
   const catalogCounts = getCatalogHeadlineCounts();
-  if (installUserOrProjectLocalAssets) {
+  {
     const promptsSrc = join(pkgRoot, 'prompts');
     const promptsDst = scopeDirs.promptsDir;
     const promptCount = await installDirectory(promptsSrc, promptsDst, '.md', { force, dryRun, verbose });
@@ -218,13 +255,11 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
     } else {
       console.log(`  Installed ${promptCount} agent prompts.\n`);
     }
-  } else {
-    console.log('  Skipped for scope "project" (no prompts install).\n');
   }
 
   // Step 3: Install native agent configs
   console.log('[3/8] Installing native agent configs...');
-  if (installUserOrProjectLocalAssets) {
+  {
     const agentConfigCount = await installNativeAgentConfigs(pkgRoot, {
       force,
       dryRun,
@@ -232,13 +267,11 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
       agentsDir: scopeDirs.nativeAgentsDir,
     });
     console.log(`  Installed ${agentConfigCount} native agent configs to ${scopeDirs.nativeAgentsDir}.\n`);
-  } else {
-    console.log('  Skipped for scope "project" (no native agent config install).\n');
   }
 
   // Step 4: Install skills
   console.log('[4/8] Installing skills...');
-  if (installUserOrProjectLocalAssets) {
+  {
     const skillsSrc = join(pkgRoot, 'skills');
     const skillsDst = scopeDirs.skillsDir;
     const skillCount = await installSkills(skillsSrc, skillsDst, { force, dryRun, verbose });
@@ -247,23 +280,17 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
     } else {
       console.log(`  Installed ${skillCount} skills.\n`);
     }
-  } else {
-    console.log('  Skipped for scope "project" (no skills install).\n');
   }
 
   // Step 5: Update config.toml
   console.log('[5/8] Updating config.toml...');
-  if (installUserOrProjectLocalAssets) {
-    if (!dryRun) {
-      await mergeConfig(scopeDirs.codexConfigFile, pkgRoot, {
-        verbose,
-        agentsConfigDir: scopeDirs.nativeAgentsDir,
-      });
-    }
-    console.log(`  Done (${scopeDirs.codexConfigFile}).\n`);
-  } else {
-    console.log('  Skipped for scope "project" (no config.toml updates).\n');
+  if (!dryRun) {
+    await mergeConfig(scopeDirs.codexConfigFile, pkgRoot, {
+      verbose,
+      agentsConfigDir: scopeDirs.nativeAgentsDir,
+    });
   }
+  console.log(`  Done (${scopeDirs.codexConfigFile}).\n`);
 
   // Step 5.5: Verify team comm MCP tools are available via omx_state server.
   console.log('[5.5/8] Verifying Team MCP comm tools...');
@@ -280,17 +307,29 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
   console.log('[6/8] Generating AGENTS.md...');
   const agentsMdSrc = join(pkgRoot, 'templates', 'AGENTS.md');
   const agentsMdDst = join(projectRoot, 'AGENTS.md');
+  const agentsMdExists = existsSync(agentsMdDst);
 
   // Guard: refuse to overwrite AGENTS.md during active session
   const activeSession = await readSessionState(projectRoot);
   const sessionIsActive = activeSession && !isSessionStale(activeSession);
 
   if (existsSync(agentsMdSrc)) {
-    if (sessionIsActive && force) {
+    let shouldOverwriteAgentsMd = force;
+    if (!force && agentsMdExists && process.stdin.isTTY && process.stdout.isTTY) {
+      shouldOverwriteAgentsMd = agentsOverwritePrompt
+        ? await agentsOverwritePrompt()
+        : await promptForAgentsOverwrite();
+    }
+
+    if (sessionIsActive && shouldOverwriteAgentsMd) {
       console.log('  WARNING: Active omx session detected (pid ' + activeSession!.pid + ').');
       console.log('  Skipping AGENTS.md overwrite to avoid corrupting runtime overlay.');
-      console.log('  Stop the active session first, then re-run setup --force.');
-    } else if (force || !existsSync(agentsMdDst)) {
+      if (force) {
+        console.log('  Stop the active session first, then re-run setup --force.');
+      } else {
+        console.log('  Stop the active session first, then re-run setup and approve overwrite (or use --force).');
+      }
+    } else if (shouldOverwriteAgentsMd || !agentsMdExists) {
       if (!dryRun) {
         const content = await readFile(agentsMdSrc, 'utf-8');
         const rewritten = applyScopePathRewritesToAgentsTemplate(content, resolvedScope.scope);
@@ -323,11 +362,7 @@ export async function setup(options: SetupOptions = {}): Promise<void> {
   } else {
     console.log('  HUD config already exists (use --force to overwrite).');
   }
-  if (installUserOrProjectLocalAssets) {
-    console.log('  StatusLine configured in config.toml via [tui] section.');
-  } else {
-    console.log('  StatusLine setup skipped because config.toml was not modified for scope "project".');
-  }
+  console.log('  StatusLine configured in config.toml via [tui] section.');
   console.log();
 
   console.log('Setup complete! Run "omx doctor" to verify installation.');
@@ -432,20 +467,45 @@ async function installSkills(
     const skillMd = join(skillSrc, 'SKILL.md');
     if (!existsSync(skillMd)) continue;
 
+    let copied = 0;
+    let overwritten = 0;
+    let skipped = 0;
+    const skillFiles = await readdir(skillSrc);
+
     if (!options.dryRun) {
       await mkdir(skillDst, { recursive: true });
-      // Copy all files in the skill directory
-      const skillFiles = await readdir(skillSrc);
-      for (const sf of skillFiles) {
-        const sfPath = join(skillSrc, sf);
-        const sfStat = await stat(sfPath);
-        if (sfStat.isFile()) {
-          await copyFile(sfPath, join(skillDst, sf));
-        }
+    }
+
+    for (const sf of skillFiles) {
+      const sfPath = join(skillSrc, sf);
+      const sfStat = await stat(sfPath);
+      if (!sfStat.isFile()) continue;
+
+      const dstPath = join(skillDst, sf);
+      const dstExists = existsSync(dstPath);
+      if (dstExists && !options.force) {
+        skipped++;
+        continue;
+      }
+
+      if (!options.dryRun) {
+        await copyFile(sfPath, dstPath);
+      }
+      if (dstExists) {
+        overwritten++;
+      } else {
+        copied++;
       }
     }
-    if (options.verbose) console.log(`  ${entry.name}/`);
-    count++;
+
+    if (copied + overwritten > 0) {
+      count++;
+    }
+    if (options.verbose) {
+      console.log(
+        `  ${entry.name}/ (copied: ${copied}, overwritten: ${overwritten}, skipped: ${skipped})`,
+      );
+    }
   }
   return count;
 }

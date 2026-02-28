@@ -12,8 +12,174 @@
 import { execFileSync } from 'child_process';
 import { readAllState, readHudConfig } from './state.js';
 import { renderHud } from './render.js';
-import type { HudFlags, HudPreset } from './types.js';
+import type { HudFlags, HudPreset, HudRenderContext } from './types.js';
 import { HUD_TMUX_HEIGHT_LINES } from './constants.js';
+
+type SleepFn = (ms: number, signal?: AbortSignal) => Promise<void>;
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  if (!signal) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+export async function watchRenderLoop(
+  render: () => Promise<void>,
+  options: {
+    intervalMs?: number;
+    signal?: AbortSignal;
+    onError?: (error: unknown) => void;
+    sleepFn?: SleepFn;
+  } = {},
+): Promise<void> {
+  const intervalMs = Math.max(0, options.intervalMs ?? 1000);
+  const sleepFn = options.sleepFn ?? sleep;
+  const signal = options.signal;
+
+  while (!signal?.aborted) {
+    const startedAt = Date.now();
+    try {
+      await render();
+    } catch (error) {
+      options.onError?.(error);
+    }
+
+    if (signal?.aborted) return;
+    const elapsedMs = Date.now() - startedAt;
+    await sleepFn(Math.max(0, intervalMs - elapsedMs), signal);
+  }
+}
+
+interface RunWatchModeDependencies {
+  isTTY: boolean;
+  env: NodeJS.ProcessEnv;
+  readAllStateFn: (cwd: string) => Promise<HudRenderContext>;
+  readHudConfigFn: (cwd: string) => Promise<{ preset: HudPreset }>;
+  renderHudFn: (ctx: HudRenderContext, preset: HudPreset) => string;
+  writeStdout: (text: string) => void;
+  writeStderr: (text: string) => void;
+  registerSigint: (handler: () => void) => void;
+  setIntervalFn: (handler: () => void, intervalMs: number) => ReturnType<typeof setInterval>;
+  clearIntervalFn: (timer: ReturnType<typeof setInterval>) => void;
+}
+
+/**
+ * Backward-compatible watch mode runner used by tests.
+ */
+export async function runWatchMode(
+  cwd: string,
+  flags: HudFlags,
+  deps: Partial<RunWatchModeDependencies> = {},
+): Promise<void> {
+  if (!flags.watch) return;
+
+  const dependencies: RunWatchModeDependencies = {
+    isTTY: deps.isTTY ?? Boolean(process.stdout.isTTY),
+    env: deps.env ?? process.env,
+    readAllStateFn: deps.readAllStateFn ?? readAllState,
+    readHudConfigFn: deps.readHudConfigFn ?? readHudConfig,
+    renderHudFn: deps.renderHudFn ?? renderHud,
+    writeStdout: deps.writeStdout ?? ((text: string) => process.stdout.write(text)),
+    writeStderr: deps.writeStderr ?? ((text: string) => process.stderr.write(text)),
+    registerSigint: deps.registerSigint ?? ((handler: () => void) => process.on('SIGINT', handler)),
+    setIntervalFn: deps.setIntervalFn ?? ((handler: () => void, intervalMs: number) => setInterval(handler, intervalMs)),
+    clearIntervalFn: deps.clearIntervalFn ?? ((timer: ReturnType<typeof setInterval>) => clearInterval(timer)),
+  };
+
+  if (!dependencies.isTTY && !dependencies.env.CI) {
+    dependencies.writeStderr('HUD watch mode requires a TTY\n');
+    process.exitCode = 1;
+    return;
+  }
+
+  dependencies.writeStdout('\x1b[?25l');
+
+  let firstRender = true;
+  let inFlight = false;
+  let queued = false;
+  let stopped = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let resolveDone: () => void = () => {};
+  const done = new Promise<void>((resolve) => {
+    resolveDone = resolve;
+  });
+
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (timer) dependencies.clearIntervalFn(timer);
+    dependencies.writeStdout('\x1b[?25h\x1b[2J\x1b[H');
+    resolveDone();
+  };
+
+  const renderTick = async () => {
+    if (stopped) return;
+    if (inFlight) {
+      queued = true;
+      return;
+    }
+    inFlight = true;
+    try {
+      if (firstRender) {
+        dependencies.writeStdout('\x1b[2J\x1b[H');
+        firstRender = false;
+      } else {
+        dependencies.writeStdout('\x1b[H');
+      }
+      const [ctx, config] = await Promise.all([
+        dependencies.readAllStateFn(cwd),
+        dependencies.readHudConfigFn(cwd),
+      ]);
+      const preset = flags.preset ?? config.preset;
+      const line = dependencies.renderHudFn(ctx, preset);
+      dependencies.writeStdout(line + '\x1b[K\n\x1b[J');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      dependencies.writeStderr(`HUD watch render failed: ${message}\n`);
+      process.exitCode = 1;
+      stop();
+      return;
+    } finally {
+      inFlight = false;
+    }
+
+    if (queued) {
+      queued = false;
+      await renderTick();
+    }
+  };
+
+  dependencies.registerSigint(stop);
+  timer = dependencies.setIntervalFn(() => {
+    void renderTick();
+  }, 1000);
+
+  await renderTick();
+  if (!stopped) {
+    await done;
+  }
+}
 
 function parseHudPreset(value: string | undefined): HudPreset | undefined {
   if (value === 'minimal' || value === 'focused' || value === 'full') {
@@ -92,18 +258,25 @@ export async function hudCommand(args: string[]): Promise<void> {
   };
 
   process.stdout.write('\x1b[?25l'); // Hide cursor
-  await render();
-  const interval = setInterval(render, 1000);
+  const abortController = new AbortController();
+  const onSigint = () => {
+    abortController.abort();
+  };
 
-  // Graceful exit on Ctrl+C
-  process.on('SIGINT', () => {
-    clearInterval(interval);
+  process.on('SIGINT', onSigint);
+  try {
+    await render();
+    await watchRenderLoop(render, {
+      intervalMs: 1000,
+      signal: abortController.signal,
+      onError: (error) => {
+        console.warn('[omx] warning: hud watch render failed', error);
+      },
+    });
+  } finally {
+    process.off('SIGINT', onSigint);
     process.stdout.write('\x1b[?25h\x1b[2J\x1b[H'); // Show cursor + clear
-    process.exit(0);
-  });
-
-  // Keep process alive
-  await new Promise(() => {}); // Never resolves - exits via SIGINT
+  }
 }
 
 /** Shell-escape a string using single-quote wrapping (POSIX-safe). */

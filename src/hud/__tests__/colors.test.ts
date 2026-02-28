@@ -4,13 +4,10 @@ import {
   RESET,
   green,
   yellow,
-  red,
   cyan,
   dim,
   bold,
   getRalphColor,
-  getTodoColor,
-  coloredBar,
 } from '../colors.js';
 
 const GREEN = '\x1b[32m';
@@ -49,16 +46,6 @@ describe('yellow', () => {
 
   it('handles empty string', () => {
     assert.equal(yellow(''), `${YELLOW_CODE}${RESET}`);
-  });
-});
-
-describe('red', () => {
-  it('wraps text with red ANSI codes', () => {
-    assert.equal(red('error'), `${RED_CODE}error${RESET}`);
-  });
-
-  it('handles empty string', () => {
-    assert.equal(red(''), `${RED_CODE}${RESET}`);
   });
 });
 
@@ -128,118 +115,5 @@ describe('getRalphColor', () => {
     assert.equal(getRalphColor(3, 7), GREEN);
     assert.equal(getRalphColor(4, 7), YELLOW_CODE);
     assert.equal(getRalphColor(6, 7), RED_CODE);
-  });
-});
-
-describe('getTodoColor', () => {
-  it('returns DIM when total is 0', () => {
-    assert.equal(getTodoColor(0, 0), DIM_CODE);
-    assert.equal(getTodoColor(5, 0), DIM_CODE);
-  });
-
-  it('returns GREEN when 80% or more is complete', () => {
-    assert.equal(getTodoColor(8, 10), GREEN);   // 80%
-    assert.equal(getTodoColor(10, 10), GREEN);  // 100%
-    assert.equal(getTodoColor(9, 10), GREEN);   // 90%
-  });
-
-  it('returns YELLOW when 50% to 79% is complete', () => {
-    assert.equal(getTodoColor(5, 10), YELLOW_CODE);    // 50%
-    assert.equal(getTodoColor(7, 10), YELLOW_CODE);    // 70%
-    assert.equal(getTodoColor(79, 100), YELLOW_CODE);  // 79%
-  });
-
-  it('returns CYAN when less than 50% is complete', () => {
-    assert.equal(getTodoColor(0, 10), CYAN_CODE);    // 0%
-    assert.equal(getTodoColor(4, 10), CYAN_CODE);    // 40%
-    assert.equal(getTodoColor(49, 100), CYAN_CODE);  // 49%
-  });
-
-  it('handles single item fully completed', () => {
-    assert.equal(getTodoColor(1, 1), GREEN);  // 100%
-  });
-});
-
-describe('coloredBar', () => {
-  it('returns a non-empty string', () => {
-    const bar = coloredBar(50, 10);
-    assert.ok(typeof bar === 'string' && bar.length > 0);
-  });
-
-  it('ends with RESET', () => {
-    assert.ok(coloredBar(50, 10).endsWith(RESET));
-    assert.ok(coloredBar(0, 10).endsWith(RESET));
-    assert.ok(coloredBar(100, 10).endsWith(RESET));
-  });
-
-  it('uses GREEN for below 70%', () => {
-    assert.ok(coloredBar(0, 10).startsWith(GREEN));
-    assert.ok(coloredBar(69, 10).startsWith(GREEN));
-  });
-
-  it('uses YELLOW for 70% to 84%', () => {
-    assert.ok(coloredBar(70, 10).startsWith(YELLOW_CODE));
-    assert.ok(coloredBar(84, 10).startsWith(YELLOW_CODE));
-  });
-
-  it('uses RED for 85% or more', () => {
-    assert.ok(coloredBar(85, 10).startsWith(RED_CODE));
-    assert.ok(coloredBar(100, 10).startsWith(RED_CODE));
-  });
-
-  it('produces correct filled block count at 50% with default width', () => {
-    const bar = coloredBar(50);
-    // Math.round(0.5 * 10) = 5 filled
-    assert.equal((bar.match(/█/g) || []).length, 5);
-    assert.equal((bar.match(/░/g) || []).length, 5);
-  });
-
-  it('produces correct filled/empty counts for 40% width=10', () => {
-    const bar = coloredBar(40, 10);
-    // Math.round(0.4 * 10) = 4 filled, 6 empty
-    assert.equal((bar.match(/█/g) || []).length, 4);
-    assert.equal((bar.match(/░/g) || []).length, 6);
-  });
-
-  it('fills all blocks at 100%', () => {
-    const bar = coloredBar(100, 10);
-    assert.equal((bar.match(/█/g) || []).length, 10);
-    assert.equal((bar.match(/░/g) || []).length, 0);
-  });
-
-  it('empties all blocks at 0%', () => {
-    const bar = coloredBar(0, 10);
-    assert.equal((bar.match(/█/g) || []).length, 0);
-    assert.equal((bar.match(/░/g) || []).length, 10);
-  });
-
-  it('clamps percent above 100 to 100', () => {
-    const bar = coloredBar(200, 10);
-    assert.equal((bar.match(/█/g) || []).length, 10);
-    assert.equal((bar.match(/░/g) || []).length, 0);
-  });
-
-  it('clamps percent below 0 to 0', () => {
-    const bar = coloredBar(-50, 10);
-    assert.equal((bar.match(/█/g) || []).length, 0);
-    assert.equal((bar.match(/░/g) || []).length, 10);
-  });
-
-  it('treats non-finite percent as 0', () => {
-    const bar = coloredBar(NaN, 10);
-    assert.equal((bar.match(/█/g) || []).length, 0);
-    assert.equal((bar.match(/░/g) || []).length, 10);
-  });
-
-  it('treats non-finite width as 0 – no blocks', () => {
-    const bar = coloredBar(50, NaN);
-    assert.equal((bar.match(/█/g) || []).length, 0);
-    assert.equal((bar.match(/░/g) || []).length, 0);
-  });
-
-  it('handles zero width – no blocks', () => {
-    const bar = coloredBar(50, 0);
-    assert.equal((bar.match(/█/g) || []).length, 0);
-    assert.equal((bar.match(/░/g) || []).length, 0);
   });
 });

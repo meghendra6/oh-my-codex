@@ -1,9 +1,11 @@
-import { join } from 'path';
+import { delimiter, isAbsolute, join, relative, resolve as resolvePath } from 'path';
 import { existsSync } from 'fs';
 import { readdir, readFile } from 'fs/promises';
 
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+export const STATE_MODE_SEGMENT_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const STATE_FILE_SUFFIX = '-state.json';
+const WORKDIR_ALLOWLIST_ENV = 'OMX_MCP_WORKDIR_ROOTS';
 
 export type StateFileScope = 'root' | 'session';
 
@@ -22,6 +24,30 @@ export function validateSessionId(sessionId: unknown): string | undefined {
     throw new Error('session_id must match ^[A-Za-z0-9_-]{1,64}$');
   }
   return sessionId;
+}
+
+export function validateStateModeSegment(mode: unknown): string {
+  if (typeof mode !== 'string') {
+    throw new Error('mode must be a string');
+  }
+  const normalized = mode.trim();
+  if (!normalized) {
+    throw new Error('mode must be a non-empty string');
+  }
+  if (normalized.includes('..')) {
+    throw new Error('mode must not contain ".."');
+  }
+  if (normalized.includes('/') || normalized.includes('\\')) {
+    throw new Error('mode must not contain path separators');
+  }
+  if (!STATE_MODE_SEGMENT_PATTERN.test(normalized)) {
+    throw new Error('mode must match ^[A-Za-z0-9_-]{1,64}$');
+  }
+  return normalized;
+}
+
+function getStateFilename(mode: string): string {
+  return `${validateStateModeSegment(mode)}${STATE_FILE_SUFFIX}`;
 }
 
 function convertWindowsToWslPath(raw: string): string {
@@ -44,18 +70,71 @@ function convertWslToWindowsPath(raw: string): string {
 
 export function resolveWorkingDirectoryForState(workingDirectory?: string): string {
   const raw = typeof workingDirectory === 'string' ? workingDirectory.trim() : '';
-  if (!raw) return process.cwd();
+  if (raw.includes('\0')) {
+    throw new Error('workingDirectory contains a NUL byte');
+  }
+  if (!raw) {
+    const cwd = resolvePath(process.cwd());
+    enforceWorkingDirectoryPolicy(cwd);
+    return cwd;
+  }
+
+  let normalized = raw;
 
   if (process.platform === 'win32') {
-    if (raw.startsWith('/mnt/')) return convertWslToWindowsPath(raw);
-    return raw;
+    if (normalized.startsWith('/mnt/')) {
+      normalized = convertWslToWindowsPath(normalized);
+    }
+  } else if (/^[a-zA-Z]:[\\/]/.test(normalized)) {
+    const converted = convertWindowsToWslPath(normalized);
+    if (converted === normalized) {
+      throw new Error('workingDirectory Windows path is not available on this host');
+    }
+    normalized = converted;
   }
 
-  if (/^[a-zA-Z]:[\\/]/.test(raw)) {
-    return convertWindowsToWslPath(raw);
+  if (normalized.includes('\0')) {
+    throw new Error('workingDirectory contains a NUL byte');
   }
 
-  return raw;
+  const resolved = resolvePath(normalized);
+  enforceWorkingDirectoryPolicy(resolved);
+  return resolved;
+}
+
+function parseAllowedWorkingDirectoryRoots(): string[] {
+  const raw = process.env[WORKDIR_ALLOWLIST_ENV];
+  if (typeof raw !== 'string' || raw.trim() === '') return [];
+
+  const roots = raw
+    .split(delimiter)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      if (part.includes('\0')) {
+        throw new Error(`${WORKDIR_ALLOWLIST_ENV} contains an invalid root with a NUL byte`);
+      }
+      return resolvePath(part);
+    });
+
+  return [...new Set(roots)];
+}
+
+function isWithinRoot(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function enforceWorkingDirectoryPolicy(resolvedWorkingDirectory: string): void {
+  const roots = parseAllowedWorkingDirectoryRoots();
+  if (roots.length === 0) return;
+
+  const allowed = roots.some((root) => isWithinRoot(resolvedWorkingDirectory, root));
+  if (!allowed) {
+    throw new Error(
+      `workingDirectory "${resolvedWorkingDirectory}" is outside allowed roots (${WORKDIR_ALLOWLIST_ENV})`,
+    );
+  }
 }
 
 export function getBaseStateDir(workingDirectory?: string): string {
@@ -71,7 +150,7 @@ export function getStateDir(workingDirectory?: string, sessionId?: string): stri
 }
 
 export function getStatePath(mode: string, workingDirectory?: string, sessionId?: string): string {
-  return join(getStateDir(workingDirectory, sessionId), `${mode}-state.json`);
+  return join(getStateDir(workingDirectory, sessionId), getStateFilename(mode));
 }
 
 export type StateScopeSource = 'explicit' | 'session' | 'root';
@@ -146,7 +225,8 @@ export async function getReadScopedStatePaths(
   explicitSessionId?: string,
 ): Promise<string[]> {
   const dirs = await getReadScopedStateDirs(workingDirectory, explicitSessionId);
-  return dirs.map((dir) => join(dir, `${mode}-state.json`));
+  const fileName = getStateFilename(mode);
+  return dirs.map((dir) => join(dir, fileName));
 }
 
 export async function getAllSessionScopedStatePaths(
@@ -154,7 +234,8 @@ export async function getAllSessionScopedStatePaths(
   workingDirectory?: string,
 ): Promise<string[]> {
   const sessionDirs = await getAllSessionScopedStateDirs(workingDirectory);
-  return sessionDirs.map((dir) => join(dir, `${mode}-state.json`));
+  const fileName = getStateFilename(mode);
+  return sessionDirs.map((dir) => join(dir, fileName));
 }
 
 export async function getAllScopedStatePaths(

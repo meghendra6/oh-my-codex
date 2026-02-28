@@ -1,6 +1,6 @@
 {
   "name": "oh-my-codex",
-  "version": "0.6.4",
+  "version": "0.7.5",
   "description": "Multi-agent orchestration layer for OpenAI Codex CLI",
   "type": "module",
   "main": "dist/index.js",
@@ -9,6 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "check:no-unused": "tsc -p tsconfig.no-unused.json",
     "dev": "tsc --watch",
     "setup": "node bin/omx.js setup",
     "doctor": "node bin/omx.js doctor",

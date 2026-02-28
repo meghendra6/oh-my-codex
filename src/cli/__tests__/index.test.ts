@@ -9,6 +9,8 @@ import {
   buildTmuxSessionName,
   resolveCliInvocation,
   resolveCodexLaunchPolicy,
+  classifyCodexExecFailure,
+  resolveSignalExitCode,
   parseTmuxPaneSnapshot,
   findHudWatchPaneIds,
   buildHudPaneCleanupTargets,
@@ -161,6 +163,19 @@ describe('resolveWorkerSparkModel', () => {
   it('returns undefined for empty args', () => {
     assert.equal(resolveWorkerSparkModel([]), undefined);
   });
+
+  it('reads low-complexity team model from config when codexHomeOverride is provided', async () => {
+    const codexHome = await mkdtemp(join(tmpdir(), 'omx-codex-home-'));
+    try {
+      await writeFile(
+        join(codexHome, '.omx-config.json'),
+        JSON.stringify({ models: { team_low_complexity: 'gpt-4.1-mini' } }),
+      );
+      assert.equal(resolveWorkerSparkModel(['--spark'], codexHome), 'gpt-4.1-mini');
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('resolveTeamWorkerLaunchArgsEnv (spark)', () => {
@@ -215,7 +230,7 @@ describe('resolveSetupScopeArg', () => {
   });
 
   it('parses --scope <value> form', () => {
-    assert.equal(resolveSetupScopeArg(['--dry-run', '--scope', 'project-local']), 'project-local');
+    assert.equal(resolveSetupScopeArg(['--dry-run', '--scope', 'project']), 'project');
   });
 
   it('parses --scope=<value> form', () => {
@@ -237,13 +252,13 @@ describe('resolveSetupScopeArg', () => {
   });
 });
 
-describe('project-local launch scope helpers', () => {
+describe('project launch scope helpers', () => {
   it('reads persisted setup scope when valid', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
     try {
       await mkdir(join(wd, '.omx'), { recursive: true });
-      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project-local' }));
-      assert.equal(readPersistedSetupScope(wd), 'project-local');
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project' }));
+      assert.equal(readPersistedSetupScope(wd), 'project');
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
@@ -260,11 +275,11 @@ describe('project-local launch scope helpers', () => {
     }
   });
 
-  it('uses project-local CODEX_HOME when persisted scope is project-local', async () => {
+  it('uses project CODEX_HOME when persisted scope is project', async () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
     try {
       await mkdir(join(wd, '.omx'), { recursive: true });
-      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project-local' }));
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project' }));
       assert.equal(resolveCodexHomeForLaunch(wd, {}), join(wd, '.codex'));
     } finally {
       await rm(wd, { recursive: true, force: true });
@@ -275,8 +290,30 @@ describe('project-local launch scope helpers', () => {
     const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
     try {
       await mkdir(join(wd, '.omx'), { recursive: true });
-      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project-local' }));
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project' }));
       assert.equal(resolveCodexHomeForLaunch(wd, { CODEX_HOME: '/tmp/explicit-codex-home' }), '/tmp/explicit-codex-home');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('migrates legacy "project-local" persisted scope to "project"', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
+    try {
+      await mkdir(join(wd, '.omx'), { recursive: true });
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project-local' }));
+      assert.equal(readPersistedSetupScope(wd), 'project');
+    } finally {
+      await rm(wd, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves CODEX_HOME for legacy "project-local" persisted scope', async () => {
+    const wd = await mkdtemp(join(tmpdir(), 'omx-launch-scope-'));
+    try {
+      await mkdir(join(wd, '.omx'), { recursive: true });
+      await writeFile(join(wd, '.omx', 'setup-scope.json'), JSON.stringify({ scope: 'project-local' }));
+      assert.equal(resolveCodexHomeForLaunch(wd, {}), join(wd, '.codex'));
     } finally {
       await rm(wd, { recursive: true, force: true });
     }
@@ -290,6 +327,30 @@ describe('resolveCodexLaunchPolicy', () => {
 
   it('uses tmux-aware launch path when already inside tmux', () => {
     assert.equal(resolveCodexLaunchPolicy({ TMUX: '/tmp/tmux-1000/default,123,0' }), 'inside-tmux');
+  });
+});
+
+describe('classifyCodexExecFailure', () => {
+  it('classifies child process exit status as codex exit', () => {
+    const err = Object.assign(new Error('codex exited 9'), { status: 9 });
+    const classified = classifyCodexExecFailure(err);
+    assert.equal(classified.kind, 'exit');
+    assert.equal(classified.exitCode, 9);
+  });
+
+  it('classifies signal termination as codex exit and maps to signal-based exit code', () => {
+    const err = Object.assign(new Error('terminated'), { status: null, signal: 'SIGTERM' as NodeJS.Signals });
+    const classified = classifyCodexExecFailure(err);
+    assert.equal(classified.kind, 'exit');
+    assert.equal(classified.signal, 'SIGTERM');
+    assert.equal(classified.exitCode, resolveSignalExitCode('SIGTERM'));
+  });
+
+  it('classifies ENOENT as launch error', () => {
+    const err = Object.assign(new Error('spawn codex ENOENT'), { code: 'ENOENT' });
+    const classified = classifyCodexExecFailure(err);
+    assert.equal(classified.kind, 'launch-error');
+    assert.equal(classified.code, 'ENOENT');
   });
 });
 
@@ -356,6 +417,20 @@ describe('detached tmux new-session sequencing', () => {
     assert.equal(names.includes('reconcile-hud-resize'), true);
   });
 
+  it('buildDetachedSessionFinalizeSteps uses quiet best-effort tmux resize commands', () => {
+    const steps = buildDetachedSessionFinalizeSteps('omx-demo', '%12', '3', false, false);
+    const registerHook = steps.find((step) => step.name === 'register-resize-hook');
+    const schedule = steps.find((step) => step.name === 'schedule-delayed-resize');
+    const reconcile = steps.find((step) => step.name === 'reconcile-hud-resize');
+
+    assert.match(registerHook?.args[4] ?? '', />\/dev\/null 2>&1 \|\| true/);
+    assert.match(registerHook?.args[4] ?? '', new RegExp(`-y ${HUD_TMUX_HEIGHT_LINES}\\b`));
+    assert.match(schedule?.args[2] ?? '', />\/dev\/null 2>&1 \|\| true/);
+    assert.match(schedule?.args[2] ?? '', new RegExp(`-y ${HUD_TMUX_HEIGHT_LINES}\\b`));
+    assert.match((reconcile?.args ?? []).join(' '), />\/dev\/null 2>&1 \|\| true/);
+    assert.match((reconcile?.args ?? []).join(' '), new RegExp(`-y ${HUD_TMUX_HEIGHT_LINES}\\b`));
+  });
+
   it('buildDetachedSessionRollbackSteps unregisters hooks before killing session', () => {
     const steps = buildDetachedSessionRollbackSteps(
       'omx-demo',
@@ -402,6 +477,16 @@ describe('buildTmuxSessionName', () => {
     assert.match(name, /^omx-(unknown|[a-z0-9-]+)-[a-z0-9-]+-(unknown|[a-z0-9-]+)$/);
     assert.equal(name.includes('_'), false);
     assert.equal(name.includes(' '), false);
+  });
+
+  it('includes repo name when cwd is inside .omx-worktrees', () => {
+    const name = buildTmuxSessionName('/home/user/my-repo.omx-worktrees/launch-feature-x', 'omx-123-abc');
+    assert.match(name, /^omx-my-repo-launch-feature-x-/);
+  });
+
+  it('includes repo name for detached worktree paths', () => {
+    const name = buildTmuxSessionName('/projects/cool-project.omx-worktrees/launch-detached', 'omx-456-def');
+    assert.match(name, /^omx-cool-project-launch-detached-/);
   });
 });
 

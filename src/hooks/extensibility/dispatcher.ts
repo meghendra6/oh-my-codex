@@ -7,7 +7,6 @@ import {
   discoverHookPlugins,
   isHookPluginsEnabled,
   resolveHookPluginTimeoutMs,
-  validateHookPluginExport,
 } from './loader.js';
 import type {
   HookDispatchOptions,
@@ -24,6 +23,7 @@ interface RunnerResult {
 }
 
 const RESULT_PREFIX = '__OMX_PLUGIN_RESULT__ ';
+const RUNNER_SIGKILL_GRACE_MS = 250;
 
 function hooksLogPath(cwd: string): string {
   const day = new Date().toISOString().slice(0, 10);
@@ -32,7 +32,12 @@ function hooksLogPath(cwd: string): string {
 
 async function appendHooksLog(cwd: string, payload: Record<string, unknown>): Promise<void> {
   await mkdir(join(cwd, '.omx', 'logs'), { recursive: true });
-  await appendFile(hooksLogPath(cwd), `${JSON.stringify({ timestamp: new Date().toISOString(), ...payload })}\n`).catch(() => {});
+  await appendFile(hooksLogPath(cwd), `${JSON.stringify({ timestamp: new Date().toISOString(), ...payload })}\n`).catch((error: unknown) => {
+    console.warn('[omx] warning: failed to append hook dispatch log entry', {
+      cwd,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 function isTeamWorker(env: NodeJS.ProcessEnv): boolean {
@@ -79,10 +84,47 @@ async function runPluginRunner(
     let stderr = '';
     let done = false;
     let timedOut = false;
+    let sigkillTimer: NodeJS.Timeout | undefined;
+
+    const settle = (result: HookPluginDispatchResult, clearSigkillTimer = true) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      if (clearSigkillTimer && sigkillTimer) {
+        clearTimeout(sigkillTimer);
+        sigkillTimer = undefined;
+      }
+      resolve(result);
+    };
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // Ignore if process already exited.
+      }
+      sigkillTimer = setTimeout(() => {
+        sigkillTimer = undefined;
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Ignore if process already exited.
+        }
+      }, RUNNER_SIGKILL_GRACE_MS);
+
+      const duration = Date.now() - started;
+      settle({
+        plugin: plugin.id,
+        path: plugin.path,
+        file: plugin.file,
+        plugin_id: plugin.id,
+        ok: false,
+        status: 'timeout',
+        reason: 'timeout',
+        durationMs: duration,
+        duration_ms: duration,
+      }, false);
     }, timeoutMs);
 
     child.stdout.on('data', (chunk) => {
@@ -94,11 +136,8 @@ async function runPluginRunner(
     });
 
     child.on('error', (error) => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
       const duration = Date.now() - started;
-      resolve({
+      settle({
         plugin: plugin.id,
         path: plugin.path,
         file: plugin.file,
@@ -114,12 +153,10 @@ async function runPluginRunner(
 
     child.on('close', () => {
       if (done) return;
-      done = true;
-      clearTimeout(timer);
       const duration = Date.now() - started;
 
       if (timedOut) {
-        resolve({
+        settle({
           plugin: plugin.id,
           path: plugin.path,
           file: plugin.file,
@@ -145,7 +182,7 @@ async function runPluginRunner(
       }
 
       if (parsed?.ok) {
-        resolve({
+        settle({
           plugin: plugin.id,
           path: plugin.path,
           file: plugin.file,
@@ -160,7 +197,7 @@ async function runPluginRunner(
       }
 
       const reason = parsed?.reason || 'plugin_error';
-      resolve({
+      settle({
         plugin: plugin.id,
         path: plugin.path,
         file: plugin.file,
@@ -225,33 +262,6 @@ export async function dispatchHookEvent(
   const sideEffectsEnabled = options.sideEffectsEnabled ?? (!inTeamWorker || allowTeamSideEffects);
 
   for (const plugin of plugins) {
-    const validation = await validateHookPluginExport(plugin.path);
-    if (!validation.valid) {
-      const invalid: HookPluginDispatchResult = {
-        plugin: plugin.id,
-        path: plugin.path,
-        file: plugin.file,
-        plugin_id: plugin.id,
-        ok: false,
-        status: 'invalid_export',
-        reason: validation.reason || 'invalid_export',
-        durationMs: 0,
-        duration_ms: 0,
-      };
-      summary.results.push(invalid);
-      await appendHooksLog(cwd, {
-        type: 'hook_plugin_dispatch',
-        event: event.event,
-        source: event.source,
-        plugin: plugin.id,
-        file: plugin.file,
-        ok: false,
-        status: invalid.status,
-        reason: invalid.reason,
-      });
-      continue;
-    }
-
     const result = await runPluginRunner(plugin, event, { ...options, cwd, env }, sideEffectsEnabled);
     summary.results.push(result);
 

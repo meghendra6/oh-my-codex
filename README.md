@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://nodejs.org)
 
-> **[Website](https://yeachan-heo.github.io/oh-my-codex-website/)** | **[GitHub](https://github.com/Yeachan-Heo/oh-my-codex)** | **[npm](https://www.npmjs.com/package/oh-my-codex)**
+> **[Website](https://yeachan-heo.github.io/oh-my-codex-website/)** | **[Documentation](https://yeachan-heo.github.io/oh-my-codex-website/docs.html)** | **[CLI Reference](https://yeachan-heo.github.io/oh-my-codex-website/docs.html#cli-reference)** | **[Workflows](https://yeachan-heo.github.io/oh-my-codex-website/docs.html#workflows)** | **[GitHub](https://github.com/Yeachan-Heo/oh-my-codex)** | **[npm](https://www.npmjs.com/package/oh-my-codex)**
 
 Multi-agent orchestration layer for [OpenAI Codex CLI](https://github.com/openai/codex).
 
@@ -65,7 +65,7 @@ omx --xhigh --madmax
 
 ## New in v0.5.0
 
-- **Scope-aware setup** with `omx setup --scope user|project-local|project` for flexible install modes.
+- **Scope-aware setup** with `omx setup --scope user|project` for flexible install modes.
 - **Spark worker routing** via `--spark` / `--madmax-spark` so team workers can use `gpt-5.3-codex-spark` without forcing the leader model.
 - **Catalog consolidation** — removed deprecated prompts (`deep-executor`, `scientist`) and 9 deprecated skills for a leaner surface.
 - **Notifier verbosity levels** for fine-grained CCNotifier output control.
@@ -141,11 +141,22 @@ See `docs/hooks-extension.md` for the full extension workflow and event model.
 --force
 --dry-run
 --verbose
---scope <user|project-local|project>  # setup only
+--scope <user|project>  # setup only
 ```
 
 `--madmax` maps to Codex `--dangerously-bypass-approvals-and-sandbox`.
 Use it only in trusted/external sandbox environments.
+
+### MCP workingDirectory policy (optional hardening)
+
+By default, MCP state/memory/trace tools accept caller-provided `workingDirectory`.
+To constrain this, set an allowlist of roots:
+
+```bash
+export OMX_MCP_WORKDIR_ROOTS="/path/to/project:/path/to/another-root"
+```
+
+When set, `workingDirectory` values outside these roots are rejected.
 
 ## Codex-First Prompt Control
 
@@ -207,11 +218,10 @@ Notes:
 - `.omx/setup-scope.json` (persisted setup scope)
 - Scope-dependent installs:
   - `user`: `~/.codex/prompts/`, `~/.agents/skills/`, `~/.codex/config.toml`, `~/.omx/agents/`
-  - `project-local`: `./.codex/prompts/`, `./.agents/skills/`, `./.codex/config.toml`, `./.omx/agents/`
-  - `project`: skips prompt/skill/config/native-agent installs
-- Launch behavior: if persisted scope is `project-local`, `omx` launch auto-uses `CODEX_HOME=./.codex` (unless `CODEX_HOME` is already set).
-- Existing `AGENTS.md` is preserved unless `--force` is used (and active-session safety checks still apply).
-- `config.toml` updates (for `user`/`project-local` scopes):
+  - `project`: `./.codex/prompts/`, `./.agents/skills/`, `./.codex/config.toml`, `./.omx/agents/`
+- Launch behavior: if persisted scope is `project`, `omx` launch auto-uses `CODEX_HOME=./.codex` (unless `CODEX_HOME` is already set).
+- Existing `AGENTS.md` is preserved by default. In interactive TTY runs, setup prompts before overwrite; `--force` overwrites without prompt (active-session safety checks still apply).
+- `config.toml` updates (for both scopes):
   - `notify = ["node", "..."]`
   - `model_reasoning_effort = "high"`
   - `developer_instructions = "..."`
@@ -223,8 +233,8 @@ Notes:
 
 ## Agents and Skills
 
-- Prompts: `prompts/*.md` (installed to `~/.codex/prompts/` for `user`, `./.codex/prompts/` for `project-local`)
-- Skills: `skills/*/SKILL.md` (installed to `~/.agents/skills/` for `user`, `./.agents/skills/` for `project-local`)
+- Prompts: `prompts/*.md` (installed to `~/.codex/prompts/` for `user`, `./.codex/prompts/` for `project`)
+- Skills: `skills/*/SKILL.md` (installed to `~/.agents/skills/` for `user`, `./.agents/skills/` for `project`)
 
 Examples:
 - Agents: `architect`, `planner`, `executor`, `debugger`, `verifier`, `security-reviewer`
@@ -261,9 +271,17 @@ npm run build
 npm test
 ```
 
+## Documentation
+
+- **[Full Documentation](https://yeachan-heo.github.io/oh-my-codex-website/docs.html)** - Complete guide
+- **[CLI Reference](https://yeachan-heo.github.io/oh-my-codex-website/docs.html#cli-reference)** - All `omx` commands, flags, and tools
+- **[Notifications Guide](https://yeachan-heo.github.io/oh-my-codex-website/docs.html#notifications)** - Discord, Telegram, Slack, and webhook setup
+- **[Recommended Workflows](https://yeachan-heo.github.io/oh-my-codex-website/docs.html#workflows)** - Battle-tested skill chains for common tasks
+- **[Release Notes](https://yeachan-heo.github.io/oh-my-codex-website/docs.html#release-notes)** - What's new in each version
+
 ## Notes
 
-- Release notes: `CHANGELOG.md`
+- Full changelog: `CHANGELOG.md`
 - Migration guide (post-v0.4.4 mainline): `docs/migration-mainline-post-v0.4.4.md`
 - Coverage and parity notes: `COVERAGE.md`
 - Hook extension workflow: `docs/hooks-extension.md`

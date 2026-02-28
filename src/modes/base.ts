@@ -1,12 +1,13 @@
 /**
  * Base mode lifecycle management for oh-my-codex
- * All execution modes (autopilot, ralph, ultrawork, ecomode) share this base.
+ * All execution modes (autopilot, ralph, ultrawork, team, ultraqa, ralplan) share this base.
  */
 
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { join } from 'path';
 import { existsSync } from 'fs';
 import { withModeRuntimeContext } from '../state/mode-state-context.js';
+import { validateAndNormalizeRalphState } from '../ralph/contract.js';
 
 export interface ModeState {
   active: boolean;
@@ -22,10 +23,45 @@ export interface ModeState {
   [key: string]: unknown;
 }
 
-export type ModeName = 'autopilot' | 'ralph' | 'ultrawork' | 'ecomode' |
-  'ultrapilot' | 'team' | 'pipeline' | 'ultraqa' | 'ralplan';
+export type ModeName = 'autopilot' | 'ralph' | 'ultrawork' | 'team' | 'ultraqa' | 'ralplan';
 
-const EXCLUSIVE_MODES: ModeName[] = ['autopilot', 'ralph', 'ultrawork', 'ultrapilot'];
+/** @deprecated These mode names were removed in v4.6. Use the canonical modes instead. */
+export type DeprecatedModeName = 'ultrapilot' | 'pipeline' | 'ecomode';
+
+const DEPRECATED_MODES: Record<DeprecatedModeName, string> = {
+  ultrapilot: 'Use "team" instead. ultrapilot has been merged into team mode.',
+  pipeline: 'Use "team" instead. pipeline has been merged into team mode.',
+  ecomode: 'Use "ultrawork" instead. ecomode has been merged into ultrawork mode.',
+};
+
+/**
+ * Check if a mode name is deprecated and return a warning message if so.
+ * Returns null if the mode is not deprecated.
+ */
+export function getDeprecationWarning(mode: string): string | null {
+  const warning = DEPRECATED_MODES[mode as DeprecatedModeName];
+  if (!warning) return null;
+  return `[DEPRECATED] Mode "${mode}" is deprecated. ${warning}`;
+}
+
+const EXCLUSIVE_MODES: ModeName[] = ['autopilot', 'ralph', 'ultrawork'];
+
+function normalizeRalphModeStateOrThrow(state: ModeState): ModeState {
+  const originalPhase = state.current_phase;
+  const validation = validateAndNormalizeRalphState(state as Record<string, unknown>);
+  if (!validation.ok || !validation.state) {
+    throw new Error(validation.error || 'Invalid ralph mode state');
+  }
+  const normalized = validation.state as ModeState;
+  if (
+    typeof originalPhase === 'string'
+    && typeof normalized.current_phase === 'string'
+    && normalized.current_phase !== originalPhase
+  ) {
+    normalized.ralph_phase_normalized_from = originalPhase;
+  }
+  return normalized;
+}
 
 function stateDir(projectRoot?: string): string {
   return join(projectRoot || process.cwd(), '.omx', 'state');
@@ -54,12 +90,18 @@ export async function startMode(
       const otherPath = statePath(other, projectRoot);
       if (existsSync(otherPath)) {
         try {
-          const otherState = JSON.parse(await readFile(otherPath, 'utf-8'));
+          const raw = await readFile(otherPath, 'utf-8');
+          const otherState = JSON.parse(raw) as { active?: unknown };
           if (otherState.active) {
             throw new Error(`Cannot start ${mode}: ${other} is already active. Run cancel first.`);
           }
         } catch (e) {
-          if ((e as Error).message.includes('Cannot start')) throw e;
+          const err = e as NodeJS.ErrnoException;
+          if (err?.message.includes('Cannot start')) throw err;
+          if (err?.code === 'ENOENT') continue;
+          throw new Error(
+            `Cannot start ${mode}: ${other} state file is malformed or unreadable (${otherPath}). Run cancel or repair the state file.`
+          );
         }
       }
     }
@@ -75,7 +117,10 @@ export async function startMode(
     started_at: new Date().toISOString(),
   };
 
-  const state = withModeRuntimeContext({}, stateBase) as ModeState;
+  const withContext = withModeRuntimeContext({}, stateBase) as ModeState;
+  const state = mode === 'ralph'
+    ? normalizeRalphModeStateOrThrow(withContext)
+    : withContext;
   await writeFile(statePath(mode, projectRoot), JSON.stringify(state, null, 2));
   return state;
 }
@@ -105,7 +150,10 @@ export async function updateModeState(
   if (!current) throw new Error(`Mode ${mode} not found`);
 
   const updatedBase = { ...current, ...updates };
-  const updated = withModeRuntimeContext(current, updatedBase) as ModeState;
+  const normalizedBase = mode === 'ralph'
+    ? normalizeRalphModeStateOrThrow(updatedBase as ModeState)
+    : updatedBase;
+  const updated = withModeRuntimeContext(current, normalizedBase) as ModeState;
   await writeFile(statePath(mode, projectRoot), JSON.stringify(updated, null, 2));
   return updated;
 }
@@ -167,11 +215,4 @@ export async function listActiveModes(projectRoot?: string): Promise<Array<{ mod
     }
   }
   return active;
-}
-
-/**
- * Check if mode should continue (not exceeded max iterations, still active)
- */
-export function shouldContinue(state: ModeState): boolean {
-  return state.active && state.iteration < state.max_iterations;
 }

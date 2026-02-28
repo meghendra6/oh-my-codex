@@ -150,7 +150,7 @@ Do not ask for confirmation — just read the skill file and follow its instruct
 | "autopilot", "build me", "I want a" | `$autopilot` | Read `~/.agents/skills/autopilot/SKILL.md`, execute autonomous pipeline |
 | "ultrawork", "ulw", "parallel" | `$ultrawork` | Read `~/.agents/skills/ultrawork/SKILL.md`, execute parallel agents |
 | "plan this", "plan the", "let's plan" | `$plan` | Read `~/.agents/skills/plan/SKILL.md`, start planning workflow |
-| "ralplan", "consensus plan" | `$ralplan` | Read `~/.agents/skills/ralplan/SKILL.md`, start consensus planning |
+| "ralplan", "consensus plan" | `$ralplan` | Read `~/.agents/skills/ralplan/SKILL.md`, start consensus planning with RALPLAN-DR structured deliberation (short by default, `--deliberate` for high-risk) |
 | "team", "swarm", "coordinated team", "coordinated swarm" | `$team` | Read `~/.agents/skills/team/SKILL.md`, start team orchestration (swarm compatibility alias) |
 | "ecomode", "eco", "budget" | `$ecomode` | Read `~/.agents/skills/ecomode/SKILL.md`, enable token-efficient mode |
 | "cancel", "stop", "abort" | `$cancel` | Read `~/.agents/skills/cancel/SKILL.md`, cancel active modes |
@@ -164,6 +164,11 @@ Detection rules:
 - If multiple keywords match, use the most specific (longest match)
 - Conflict resolution: explicit `$name` invocation overrides keyword detection
 - The rest of the user's message (after keyword extraction) becomes the task description
+
+Ralph / Ralplan execution gate:
+- Enforce **ralplan-first** when ralph is active and planning is not complete.
+- Planning is complete only after both `.omx/plans/prd-*.md` and `.omx/plans/test-spec-*.md` exist.
+- Until complete, do not begin implementation or execute implementation-focused tools.
 </keyword_detection>
 
 ---
@@ -179,8 +184,8 @@ Workflow Skills:
 - `team`: N coordinated agents on shared task list
 - `swarm`: N coordinated agents on shared task list (compatibility facade over team)
 - `ultraqa`: QA cycling -- test, verify, fix, repeat
-- `plan`: Strategic planning with optional consensus mode
-- `ralplan`: Iterative consensus planning (planner + architect + critic)
+- `plan`: Strategic planning with optional RALPLAN-DR consensus mode
+- `ralplan`: Iterative consensus planning with RALPLAN-DR structured deliberation (planner + architect + critic); supports `--deliberate` for high-risk work
 
 Agent Shortcuts:
 - `analyze` -> debugger: Investigation and root-cause analysis
@@ -282,6 +287,9 @@ Parallelization:
 
 Continuation:
   Before concluding, confirm: zero pending tasks, all features working, tests passing, zero errors, verification evidence collected. If any item is unchecked, continue working.
+
+Ralph planning gate:
+  If ralph is active, verify PRD + test spec artifacts exist before any implementation work/tool execution. If missing, stay in planning and create them first (ralplan-first).
 </execution_protocols>
 
 <cancellation>

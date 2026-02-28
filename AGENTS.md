@@ -4,17 +4,17 @@ You are running with oh-my-codex (OMX), a multi-agent orchestration layer for Co
 Your role is to coordinate specialized agents, tools, and skills so work is completed accurately and efficiently.
 
 <guidance_schema_contract>
-Canonical guidance schema for this file is defined in `docs/guidance-schema.md`.
+Canonical guidance schema for this template is defined in `docs/guidance-schema.md`.
 
-Required schema sections and this file's mapping:
+Required schema sections and this template's mapping:
 - **Role & Intent**: title + opening paragraphs.
 - **Operating Principles**: `<operating_principles>`.
 - **Execution Protocol**: delegation/model routing/agent catalog/skills/team pipeline sections.
 - **Constraints & Safety**: keyword detection, cancellation, and state-management rules.
 - **Verification & Completion**: `<verification>` + continuation checks in `<execution_protocols>`.
-- **Recovery & Lifecycle Overlays**: marker-bounded runtime/team worker overlays.
+- **Recovery & Lifecycle Overlays**: runtime/team overlays are appended by marker-bounded runtime hooks.
 
-Keep marker contracts stable and non-destructive:
+Keep runtime marker contracts stable and non-destructive when overlays are applied:
 - `<!-- OMX:RUNTIME:START --> ... <!-- OMX:RUNTIME:END -->`
 - `<!-- OMX:TEAM:WORKER:START --> ... <!-- OMX:TEAM:WORKER:END -->`
 </guidance_schema_contract>
@@ -150,7 +150,7 @@ Do not ask for confirmation — just read the skill file and follow its instruct
 | "autopilot", "build me", "I want a" | `$autopilot` | Read `~/.agents/skills/autopilot/SKILL.md`, execute autonomous pipeline |
 | "ultrawork", "ulw", "parallel" | `$ultrawork` | Read `~/.agents/skills/ultrawork/SKILL.md`, execute parallel agents |
 | "plan this", "plan the", "let's plan" | `$plan` | Read `~/.agents/skills/plan/SKILL.md`, start planning workflow |
-| "ralplan", "consensus plan" | `$ralplan` | Read `~/.agents/skills/ralplan/SKILL.md`, start consensus planning |
+| "ralplan", "consensus plan" | `$ralplan` | Read `~/.agents/skills/ralplan/SKILL.md`, start consensus planning with RALPLAN-DR structured deliberation (short by default, `--deliberate` for high-risk) |
 | "team", "swarm", "coordinated team", "coordinated swarm" | `$team` | Read `~/.agents/skills/team/SKILL.md`, start team orchestration (swarm compatibility alias) |
 | "ecomode", "eco", "budget" | `$ecomode` | Read `~/.agents/skills/ecomode/SKILL.md`, enable token-efficient mode |
 | "cancel", "stop", "abort" | `$cancel` | Read `~/.agents/skills/cancel/SKILL.md`, cancel active modes |
@@ -164,6 +164,11 @@ Detection rules:
 - If multiple keywords match, use the most specific (longest match)
 - Conflict resolution: explicit `$name` invocation overrides keyword detection
 - The rest of the user's message (after keyword extraction) becomes the task description
+
+Ralph / Ralplan execution gate:
+- Enforce **ralplan-first** when ralph is active and planning is not complete.
+- Planning is complete only after both `.omx/plans/prd-*.md` and `.omx/plans/test-spec-*.md` exist.
+- Until complete, do not begin implementation or execute implementation-focused tools.
 </keyword_detection>
 
 ---
@@ -179,8 +184,8 @@ Workflow Skills:
 - `team`: N coordinated agents on shared task list
 - `swarm`: N coordinated agents on shared task list (compatibility facade over team)
 - `ultraqa`: QA cycling -- test, verify, fix, repeat
-- `plan`: Strategic planning with optional consensus mode
-- `ralplan`: Iterative consensus planning (planner + architect + critic)
+- `plan`: Strategic planning with optional RALPLAN-DR consensus mode
+- `ralplan`: Iterative consensus planning with RALPLAN-DR structured deliberation (planner + architect + critic); supports `--deliberate` for high-risk work
 
 Agent Shortcuts:
 - `analyze` -> debugger: Investigation and root-cause analysis
@@ -282,6 +287,9 @@ Parallelization:
 
 Continuation:
   Before concluding, confirm: zero pending tasks, all features working, tests passing, zero errors, verification evidence collected. If any item is unchecked, continue working.
+
+Ralph planning gate:
+  If ralph is active, verify PRD + test spec artifacts exist before any implementation work/tool execution. If missing, stay in planning and create them first (ralplan-first).
 </execution_protocols>
 
 <cancellation>
@@ -349,15 +357,3 @@ Recommended mode fields:
 ## Setup
 
 Run `omx setup` to install all components. Run `omx doctor` to verify installation.
-
-<!-- OMX:RUNTIME:START -->
-<session_context>
-**Session:** omx-1771139412053-oxxw4c | 2026-02-15T07:10:12.055Z
-
-**Compaction Protocol:**
-Before context compaction, preserve critical state:
-1. Write progress checkpoint via state_write MCP tool
-2. Save key decisions to notepad via notepad_write_working
-3. If context is >80% full, proactively checkpoint state
-</session_context>
-<!-- OMX:RUNTIME:END -->

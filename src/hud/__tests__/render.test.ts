@@ -2,6 +2,7 @@ import { describe, it, mock, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderHud } from '../render.js';
 import type { HudRenderContext } from '../types.js';
+import { setColorEnabled } from '../colors.js';
 
 const RESET = '\x1b[0m';
 const DIM = '\x1b[2m';
@@ -9,8 +10,13 @@ const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
 const CYAN = '\x1b[36m';
 
+function stripSgr(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
 afterEach(() => {
   mock.restoreAll();
+  setColorEnabled(true);
 });
 
 function emptyCtx(): HudRenderContext {
@@ -21,8 +27,6 @@ function emptyCtx(): HudRenderContext {
     ultrawork: null,
     autopilot: null,
     team: null,
-    ecomode: null,
-    pipeline: null,
     metrics: null,
     hudNotify: null,
     session: null,
@@ -40,6 +44,13 @@ describe('renderHud – empty context', () => {
   it('includes the [OMX] label', () => {
     const result = renderHud(emptyCtx(), 'focused');
     assert.ok(result.includes('[OMX]'));
+  });
+
+  it('renders plain text with no ANSI escapes when colors are disabled', () => {
+    setColorEnabled(false);
+    const result = renderHud(emptyCtx(), 'focused');
+    assert.equal(/\x1b\[[0-9;]*m/.test(result), false);
+    assert.equal(result.includes('[OMX]'), true);
   });
 });
 
@@ -163,42 +174,6 @@ describe('renderHud – team', () => {
   it('omits team when null', () => {
     const result = renderHud(emptyCtx(), 'focused');
     assert.ok(!result.includes('team'));
-  });
-});
-
-// ── Ecomode ───────────────────────────────────────────────────────────────────
-
-describe('renderHud – ecomode', () => {
-  it('renders "ecomode" as dim text', () => {
-    const ctx = { ...emptyCtx(), ecomode: { active: true } };
-    const result = renderHud(ctx, 'focused');
-    assert.ok(result.includes(`${DIM}ecomode${RESET}`));
-  });
-
-  it('omits ecomode when null', () => {
-    const result = renderHud(emptyCtx(), 'focused');
-    assert.ok(!result.includes('ecomode'));
-  });
-});
-
-// ── Pipeline ──────────────────────────────────────────────────────────────────
-
-describe('renderHud – pipeline', () => {
-  it('renders pipeline with the current phase', () => {
-    const ctx = { ...emptyCtx(), pipeline: { active: true, current_phase: 'exec' } };
-    const result = renderHud(ctx, 'focused');
-    assert.ok(result.includes(`${CYAN}pipeline:exec${RESET}`));
-  });
-
-  it('defaults phase to "active" when not set', () => {
-    const ctx = { ...emptyCtx(), pipeline: { active: true } };
-    const result = renderHud(ctx, 'focused');
-    assert.ok(result.includes('pipeline:active'));
-  });
-
-  it('omits pipeline when null', () => {
-    const result = renderHud(emptyCtx(), 'focused');
-    assert.ok(!result.includes('pipeline'));
   });
 });
 
@@ -374,6 +349,22 @@ describe('renderHud – hudNotify (last activity)', () => {
     const result = renderHud(emptyCtx(), 'focused');
     assert.ok(!result.includes('last:'));
   });
+
+  it('omits last activity when timestamp is invalid', () => {
+    const ctx = { ...emptyCtx(), hudNotify: { last_turn_at: 'not-a-date', turn_count: 5 } };
+    const result = renderHud(ctx, 'focused');
+    assert.ok(!result.includes('last:'));
+  });
+
+  it('clamps future last activity timestamps to zero seconds', () => {
+    const fixedNow = 1_700_000_000_000;
+    const lastTurnAt = new Date(fixedNow + 120_000).toISOString();
+    mock.method(Date, 'now', () => fixedNow);
+
+    const ctx = { ...emptyCtx(), hudNotify: { last_turn_at: lastTurnAt, turn_count: 5 } };
+    const result = renderHud(ctx, 'focused');
+    assert.ok(result.includes('last:0s ago'));
+  });
 });
 
 // ── Session duration ──────────────────────────────────────────────────────────
@@ -412,6 +403,22 @@ describe('renderHud – session duration', () => {
   it('omits session duration when session is null', () => {
     const result = renderHud(emptyCtx(), 'focused');
     assert.ok(!result.includes('session:'));
+  });
+
+  it('omits session duration when started_at is invalid', () => {
+    const ctx = { ...emptyCtx(), session: { session_id: 's1', started_at: 'invalid-iso' } };
+    const result = renderHud(ctx, 'focused');
+    assert.ok(!result.includes('session:'));
+  });
+
+  it('clamps future started_at to zero seconds', () => {
+    const fixedNow = 1_700_000_000_000;
+    const startedAt = new Date(fixedNow + 120_000).toISOString();
+    mock.method(Date, 'now', () => fixedNow);
+
+    const ctx = { ...emptyCtx(), session: { session_id: 's1', started_at: startedAt } };
+    const result = renderHud(ctx, 'focused');
+    assert.ok(result.includes('session:0s'));
   });
 });
 
@@ -466,12 +473,10 @@ describe('renderHud – presets', () => {
     assert.ok(result.includes('turns:3'));
   });
 
-  it('minimal preset excludes autopilot, ecomode, pipeline, quota', () => {
+  it('minimal preset excludes autopilot and quota', () => {
     const ctx = {
       ...emptyCtx(),
       autopilot: { active: true, current_phase: 'exec' },
-      ecomode: { active: true },
-      pipeline: { active: true, current_phase: 'run' },
       metrics: {
         total_turns: 10,
         session_turns: 3,
@@ -481,8 +486,6 @@ describe('renderHud – presets', () => {
     };
     const result = renderHud(ctx, 'minimal');
     assert.ok(!result.includes('autopilot'));
-    assert.ok(!result.includes('ecomode'));
-    assert.ok(!result.includes('pipeline'));
     assert.ok(!result.includes('quota'));
   });
 
@@ -497,10 +500,10 @@ describe('renderHud – presets', () => {
 
   it('focused preset is the default for unrecognised preset values', () => {
     // TypeScript prevents invalid values, but we can test the focused default
-    const ctx = { ...emptyCtx(), ecomode: { active: true } };
-    // focused includes ecomode; minimal does not
-    assert.ok(renderHud(ctx, 'focused').includes('ecomode'));
-    assert.ok(!renderHud(ctx, 'minimal').includes('ecomode'));
+    const ctx = { ...emptyCtx(), autopilot: { active: true, current_phase: 'exec' } };
+    // focused includes autopilot; minimal does not
+    assert.ok(renderHud(ctx, 'focused').includes('autopilot'));
+    assert.ok(!renderHud(ctx, 'minimal').includes('autopilot'));
   });
 });
 
@@ -522,5 +525,23 @@ describe('renderHud – separator', () => {
     const ctx = { ...emptyCtx(), gitBranch: 'solo' };
     const result = renderHud(ctx, 'focused');
     assert.ok(!result.includes(' | '));
+  });
+});
+
+// ── Sanitization ─────────────────────────────────────────────────────────────
+
+describe('renderHud – sanitization', () => {
+  it('strips terminal control characters from dynamic state text', () => {
+    const injected = 'safe\x1b]8;;https://evil.example\x07click\x1b]8;;\x07\nnext';
+    const ctx = {
+      ...emptyCtx(),
+      gitBranch: injected,
+      autopilot: { active: true, current_phase: injected },
+      team: { active: true, team_name: injected },
+    };
+
+    const plain = stripSgr(renderHud(ctx, 'focused'));
+    assert.doesNotMatch(plain, /[\x00-\x1f\x7f-\x9f]/);
+    assert.ok(plain.includes('safe]8;;https://evil.exampleclick]8;;next'));
   });
 });

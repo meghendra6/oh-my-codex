@@ -1,7 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { sanitizeReplyInput, isReplyListenerProcess } from '../reply-listener.js';
+import {
+  sanitizeReplyInput,
+  isReplyListenerProcess,
+  normalizeReplyListenerConfig,
+} from '../reply-listener.js';
 
 describe('sanitizeReplyInput', () => {
   it('passes through normal text', () => {
@@ -116,5 +120,43 @@ describe('isReplyListenerProcess', () => {
   it('returns false for a non-existent PID', () => {
     // PID 0 is never a valid user process
     assert.equal(isReplyListenerProcess(0), false);
+  });
+});
+
+describe('normalizeReplyListenerConfig', () => {
+  it('clamps invalid runtime numeric values and sanitizes authorized users', () => {
+    const normalized = normalizeReplyListenerConfig({
+      enabled: true,
+      pollIntervalMs: 0,
+      maxMessageLength: -10,
+      rateLimitPerMinute: -1,
+      includePrefix: false,
+      authorizedDiscordUserIds: ['123', '', '  ', '456'],
+      discordEnabled: true,
+      discordBotToken: 'bot-token',
+      discordChannelId: 'channel-id',
+    });
+
+    assert.equal(normalized.pollIntervalMs, 500);
+    assert.equal(normalized.maxMessageLength, 1);
+    assert.equal(normalized.rateLimitPerMinute, 1);
+    assert.equal(normalized.includePrefix, false);
+    assert.deepEqual(normalized.authorizedDiscordUserIds, ['123', '456']);
+  });
+
+  it('infers enabled flags from credentials when omitted', () => {
+    const normalized = normalizeReplyListenerConfig({
+      enabled: true,
+      pollIntervalMs: 3000,
+      maxMessageLength: 500,
+      rateLimitPerMinute: 10,
+      includePrefix: true,
+      authorizedDiscordUserIds: [],
+      telegramBotToken: 'tg-token',
+      telegramChatId: 'tg-chat',
+    });
+
+    assert.equal(normalized.telegramEnabled, true);
+    assert.equal(normalized.discordEnabled, false);
   });
 });

@@ -21,6 +21,22 @@ omx setup
 omx doctor
 ```
 
+### Release-readiness local verification
+
+When validating team/state changes, run this sequence locally:
+
+```bash
+npm run build
+node --test dist/team/__tests__/state.test.js dist/hooks/__tests__/notify-hook-cross-worktree-heartbeat.test.js
+npm test
+```
+
+If you were recently in a team worker session, clear team env vars first so tests do not inherit worker-specific state roots:
+
+```bash
+unset OMX_TEAM_WORKER OMX_TEAM_STATE_ROOT OMX_TEAM_LEADER_CWD OMX_TEAM_WORKER_CLI OMX_TEAM_WORKER_CLI_MAP OMX_TEAM_WORKER_LAUNCH_ARGS
+```
+
 ## Project structure
 
 - `src/` -- TypeScript source (CLI, config, agents, MCP servers, hooks, modes, team, verification)

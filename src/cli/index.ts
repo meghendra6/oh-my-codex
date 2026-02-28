@@ -6,7 +6,9 @@
 import { execSync, execFileSync, spawn } from 'child_process';
 import { basename, dirname, join } from 'path';
 import { existsSync, readFileSync } from 'fs';
+import { constants as osConstants } from 'os';
 import { setup, SETUP_SCOPES, type SetupScope } from './setup.js';
+import { uninstall } from './uninstall.js';
 import { doctor } from './doctor.js';
 import { version } from './version.js';
 import { tmuxHookCommand } from './tmux-hook.js';
@@ -18,7 +20,6 @@ import {
   getBaseStateDir,
   getStateDir,
   listModeStateFilesWithScopePreference,
-  resolveStateScope,
 } from '../mcp/state-paths.js';
 import { maybeCheckAndPromptUpdate } from './update.js';
 import { maybePromptGithubStar } from './star-prompt.js';
@@ -53,6 +54,7 @@ import { dispatchHookEvent } from '../hooks/extensibility/dispatcher.js';
 import {
   collectInheritableTeamWorkerArgs as collectInheritableTeamWorkerArgsShared,
   resolveTeamWorkerLaunchArgs,
+  resolveTeamLowComplexityDefaultModel,
 } from '../team/model-contract.js';
 import {
   parseWorktreeMode,
@@ -66,6 +68,7 @@ oh-my-codex (omx) - Multi-agent orchestration for Codex CLI
 Usage:
   omx           Launch Codex CLI (HUD auto-attaches only when already inside tmux)
   omx setup     Install skills, prompts, MCP servers, and AGENTS.md
+  omx uninstall Remove OMX configuration and clean up installed artifacts
   omx doctor    Check installation health
   omx doctor --team  Check team/swarm runtime health diagnostics
   omx team      Spawn parallel worker panes in tmux and bootstrap inbox/task state
@@ -88,16 +91,18 @@ Options:
   --madmax      DANGEROUS: bypass Codex approvals and sandbox
                 (alias for --dangerously-bypass-approvals-and-sandbox)
   --spark       Use the Codex spark model (~1.3x faster) for team workers only
-                Workers get --model gpt-5.3-codex-spark; leader model unchanged
+                Workers get the configured low-complexity team model; leader model unchanged
   --madmax-spark  spark model for workers + bypass approvals for leader and workers
                 (shorthand for: --spark --madmax)
   -w, --worktree[=<name>]
                 Launch Codex in a git worktree (detached when no name is given)
   --force       Force reinstall (overwrite existing files)
   --dry-run     Show what would be done without doing it
+  --keep-config Skip config.toml cleanup during uninstall
+  --purge       Remove .omx/ cache directory during uninstall
   --verbose     Show detailed output
   --scope       Setup scope for "omx setup" only:
-                user | project-local | project
+                user | project
 `;
 
 const MADMAX_FLAG = '--madmax';
@@ -106,7 +111,6 @@ const HIGH_REASONING_FLAG = '--high';
 const XHIGH_REASONING_FLAG = '--xhigh';
 const SPARK_FLAG = '--spark';
 const MADMAX_SPARK_FLAG = '--madmax-spark';
-const SPARK_MODEL = 'gpt-5.3-codex-spark';
 const CONFIG_FLAG = '-c';
 const LONG_CONFIG_FLAG = '--config';
 const REASONING_KEY = 'model_reasoning_effort';
@@ -120,20 +124,33 @@ type ReasoningMode = typeof REASONING_MODES[number];
 const REASONING_MODE_SET = new Set<string>(REASONING_MODES);
 const REASONING_USAGE = 'Usage: omx reasoning <low|medium|high|xhigh>';
 
-type CliCommand = 'launch' | 'setup' | 'doctor' | 'team' | 'version' | 'tmux-hook' | 'hooks' | 'hud' | 'status' | 'cancel' | 'help' | 'reasoning' | string;
+type CliCommand = 'launch' | 'setup' | 'uninstall' | 'doctor' | 'team' | 'version' | 'tmux-hook' | 'hooks' | 'hud' | 'status' | 'cancel' | 'help' | 'reasoning' | string;
 
 export interface ResolvedCliInvocation {
   command: CliCommand;
   launchArgs: string[];
 }
 
+/**
+ * Legacy scope values that may appear in persisted setup-scope.json files.
+ * Both 'project-local' (renamed) and old 'project' (minimal, removed) are
+ * migrated to the current 'project' scope on read.
+ */
+const LEGACY_SCOPE_MIGRATION_SYNC: Record<string, SetupScope> = {
+  'project-local': 'project',
+};
+
 export function readPersistedSetupScope(cwd: string): SetupScope | undefined {
   const scopePath = join(cwd, '.omx', 'setup-scope.json');
   if (!existsSync(scopePath)) return undefined;
   try {
     const parsed = JSON.parse(readFileSync(scopePath, 'utf-8')) as Partial<{ scope: string }>;
-    if (typeof parsed.scope === 'string' && SETUP_SCOPES.includes(parsed.scope as SetupScope)) {
-      return parsed.scope as SetupScope;
+    if (typeof parsed.scope === 'string') {
+      if (SETUP_SCOPES.includes(parsed.scope as SetupScope)) {
+        return parsed.scope as SetupScope;
+      }
+      const migrated = LEGACY_SCOPE_MIGRATION_SYNC[parsed.scope];
+      if (migrated) return migrated;
     }
   } catch {
     // Ignore malformed persisted scope and use defaults.
@@ -144,7 +161,7 @@ export function readPersistedSetupScope(cwd: string): SetupScope | undefined {
 export function resolveCodexHomeForLaunch(cwd: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (env.CODEX_HOME && env.CODEX_HOME.trim() !== '') return env.CODEX_HOME;
   const persistedScope = readPersistedSetupScope(cwd);
-  if (persistedScope === 'project-local') {
+  if (persistedScope === 'project') {
     return join(cwd, '.codex');
   }
   return undefined;
@@ -192,6 +209,83 @@ export type CodexLaunchPolicy = 'inside-tmux' | 'direct';
 
 export function resolveCodexLaunchPolicy(env: NodeJS.ProcessEnv = process.env): CodexLaunchPolicy {
   return env.TMUX ? 'inside-tmux' : 'direct';
+}
+
+type ExecFileSyncFailure = NodeJS.ErrnoException & {
+  status?: number | null;
+  signal?: NodeJS.Signals | null;
+};
+
+export interface CodexExecFailureClassification {
+  kind: 'exit' | 'launch-error';
+  code?: string;
+  message: string;
+  exitCode?: number;
+  signal?: NodeJS.Signals;
+}
+
+export function resolveSignalExitCode(signal: NodeJS.Signals | null | undefined): number {
+  if (!signal) return 1;
+  const signalNumber = osConstants.signals[signal];
+  if (typeof signalNumber === 'number' && Number.isFinite(signalNumber)) {
+    return 128 + signalNumber;
+  }
+  return 1;
+}
+
+export function classifyCodexExecFailure(error: unknown): CodexExecFailureClassification {
+  if (!error || typeof error !== 'object') {
+    return {
+      kind: 'launch-error',
+      message: String(error),
+    };
+  }
+
+  const err = error as ExecFileSyncFailure;
+  const code = typeof err.code === 'string' ? err.code : undefined;
+  const message = typeof err.message === 'string' && err.message.length > 0
+    ? err.message
+    : 'unknown codex launch failure';
+  const hasExitStatus = typeof err.status === 'number';
+  const hasSignal = typeof err.signal === 'string' && err.signal.length > 0;
+
+  if (hasExitStatus || hasSignal) {
+    return {
+      kind: 'exit',
+      code,
+      message,
+      exitCode: hasExitStatus ? err.status as number : resolveSignalExitCode(err.signal),
+      signal: hasSignal ? err.signal as NodeJS.Signals : undefined,
+    };
+  }
+
+  return {
+    kind: 'launch-error',
+    code,
+    message,
+  };
+}
+
+function runCodexBlocking(cwd: string, launchArgs: string[], codexEnv: NodeJS.ProcessEnv): void {
+  try {
+    execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
+  } catch (error) {
+    const classified = classifyCodexExecFailure(error);
+    if (classified.kind === 'exit') {
+      process.exitCode = classified.exitCode ?? 1;
+      if (classified.signal) {
+        console.error(`[omx] codex exited due to signal ${classified.signal}`);
+      }
+      return;
+    }
+
+    if (classified.code === 'ENOENT') {
+      console.error('[omx] failed to launch codex: executable not found in PATH');
+    } else {
+      console.error(`[omx] failed to launch codex: ${classified.message}`);
+    }
+    throw error;
+  }
 }
 
 interface TmuxPaneSnapshot {
@@ -249,7 +343,7 @@ export function buildHudPaneCleanupTargets(existingPaneIds: string[], createdPan
 
 export async function main(args: string[]): Promise<void> {
   const knownCommands = new Set([
-    'launch', 'setup', 'doctor', 'team', 'ralph', 'version', 'tmux-hook', 'hooks', 'hud', 'status', 'cancel', 'help', '--help', '-h',
+    'launch', 'setup', 'uninstall', 'doctor', 'team', 'ralph', 'version', 'tmux-hook', 'hooks', 'hud', 'status', 'cancel', 'help', '--help', '-h',
   ]);
   const firstArg = args[0];
   const { command, launchArgs } = resolveCliInvocation(args);
@@ -261,6 +355,11 @@ export async function main(args: string[]): Promise<void> {
     team: flags.has('--team'),
   };
 
+  if (flags.has('--help') || flags.has('-h')) {
+    console.log(HELP);
+    return;
+  }
+
   try {
     switch (command) {
       case 'launch':
@@ -271,6 +370,15 @@ export async function main(args: string[]): Promise<void> {
           force: options.force,
           dryRun: options.dryRun,
           verbose: options.verbose,
+          scope: resolveSetupScopeArg(args.slice(1)),
+        });
+        break;
+      case 'uninstall':
+        await uninstall({
+          dryRun: options.dryRun,
+          keepConfig: flags.has('--keep-config'),
+          verbose: options.verbose,
+          purge: flags.has('--purge'),
           scope: resolveSetupScopeArg(args.slice(1)),
         });
         break;
@@ -400,7 +508,8 @@ export async function launchWithHud(args: string[]): Promise<void> {
 
   const launchCwd = process.cwd();
   const parsedWorktree = parseWorktreeMode(args);
-  const workerSparkModel = resolveWorkerSparkModel(parsedWorktree.remainingArgs);
+  const codexHomeOverride = resolveCodexHomeForLaunch(launchCwd, process.env);
+  const workerSparkModel = resolveWorkerSparkModel(parsedWorktree.remainingArgs, codexHomeOverride);
   const normalizedArgs = normalizeCodexLaunchArgs(parsedWorktree.remainingArgs);
   let cwd = launchCwd;
   if (parsedWorktree.mode.enabled) {
@@ -438,7 +547,7 @@ export async function launchWithHud(args: string[]): Promise<void> {
 
   // ── Phase 2: run ────────────────────────────────────────────────────────
   try {
-    runCodex(cwd, normalizedArgs, sessionId, workerSparkModel);
+    runCodex(cwd, normalizedArgs, sessionId, workerSparkModel, codexHomeOverride);
   } finally {
     // ── Phase 3: postLaunch ─────────────────────────────────────────────
     await postLaunch(cwd, sessionId);
@@ -507,17 +616,13 @@ export function normalizeCodexLaunchArgs(args: string[]): string[] {
  * raw (pre-normalize) args, or undefined if neither flag is present.
  * Used to route the spark model to team workers without affecting the leader.
  */
-export function resolveWorkerSparkModel(args: string[]): string | undefined {
+export function resolveWorkerSparkModel(args: string[], codexHomeOverride?: string): string | undefined {
   for (const arg of args) {
     if (arg === SPARK_FLAG || arg === MADMAX_SPARK_FLAG) {
-      return SPARK_MODEL;
+      return resolveTeamLowComplexityDefaultModel(codexHomeOverride);
     }
   }
   return undefined;
-}
-
-function isReasoningOverride(value: string): boolean {
-  return new RegExp(`^${REASONING_KEY}\\s*=`).test(value.trim());
 }
 
 function isModelInstructionsOverride(value: string): boolean {
@@ -665,7 +770,11 @@ function sanitizeTmuxToken(value: string): string {
 }
 
 export function buildTmuxSessionName(cwd: string, sessionId: string): string {
-  const dirToken = sanitizeTmuxToken(basename(cwd));
+  const parentDir = basename(dirname(cwd));
+  const dirName = basename(cwd);
+  const dirToken = parentDir.endsWith('.omx-worktrees')
+    ? sanitizeTmuxToken(`${parentDir.slice(0, -'.omx-worktrees'.length)}-${dirName}`)
+    : sanitizeTmuxToken(dirName);
   let branchToken = 'detached';
   try {
     const branch = execSync('git rev-parse --abbrev-ref HEAD', {
@@ -743,19 +852,19 @@ export function buildDetachedSessionFinalizeSteps(
     const clientAttachedHookName = buildClientAttachedReconcileHookName('launch', sessionName, hookWindowIndex, hudPaneId);
     steps.push({
       name: 'register-resize-hook',
-      args: buildRegisterResizeHookArgs(hookTarget, hookName, hudPaneId),
+      args: buildRegisterResizeHookArgs(hookTarget, hookName, hudPaneId, HUD_TMUX_HEIGHT_LINES),
     });
     steps.push({
       name: 'register-client-attached-reconcile',
-      args: buildRegisterClientAttachedReconcileArgs(hookTarget, clientAttachedHookName, hudPaneId),
+      args: buildRegisterClientAttachedReconcileArgs(hookTarget, clientAttachedHookName, hudPaneId, HUD_TMUX_HEIGHT_LINES),
     });
     steps.push({
       name: 'schedule-delayed-resize',
-      args: buildScheduleDelayedHudResizeArgs(hudPaneId),
+      args: buildScheduleDelayedHudResizeArgs(hudPaneId, undefined, HUD_TMUX_HEIGHT_LINES),
     });
     steps.push({
       name: 'reconcile-hud-resize',
-      args: buildReconcileHudResizeArgs(hudPaneId),
+      args: buildReconcileHudResizeArgs(hudPaneId, HUD_TMUX_HEIGHT_LINES),
     });
   }
 
@@ -859,7 +968,13 @@ async function preLaunch(cwd: string, sessionId: string): Promise<void> {
  * runCodex: Launch Codex CLI (blocks until exit).
  * All 3 paths (new tmux, existing tmux, no tmux) block via execSync/execFileSync.
  */
-function runCodex(cwd: string, args: string[], sessionId: string, workerDefaultModel?: string): void {
+function runCodex(
+  cwd: string,
+  args: string[],
+  sessionId: string,
+  workerDefaultModel?: string,
+  codexHomeOverride?: string,
+): void {
   const launchArgs = injectModelInstructionsBypassArgs(
     cwd,
     args,
@@ -875,7 +990,6 @@ function runCodex(cwd: string, args: string[], sessionId: string, workerDefaultM
     inheritLeaderFlags,
     workerDefaultModel,
   );
-  const codexHomeOverride = resolveCodexHomeForLaunch(cwd, process.env);
   const codexBaseEnv = codexHomeOverride
     ? { ...process.env, CODEX_HOME: codexHomeOverride }
     : process.env;
@@ -911,9 +1025,7 @@ function runCodex(cwd: string, args: string[], sessionId: string, workerDefaultM
     }
 
     try {
-      execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
-    } catch {
-      // Codex exited
+      runCodexBlocking(cwd, launchArgs, codexEnv);
     } finally {
       const cleanupPaneIds = buildHudPaneCleanupTargets(
         listHudWatchPaneIdsInCurrentWindow(currentPaneId),
@@ -1001,11 +1113,7 @@ function runCodex(cwd: string, args: string[], sessionId: string, workerDefaultM
         }
       }
       // tmux not available or failed, just run codex directly
-      try {
-        execFileSync('codex', launchArgs, { cwd, stdio: 'inherit', env: codexEnv });
-      } catch {
-        // Codex exited
-      }
+      runCodexBlocking(cwd, launchArgs, codexEnv);
     }
   }
 }
@@ -1212,12 +1320,20 @@ async function startNotifyFallbackWatcher(cwd: string): Promise<void> {
       if (prev && typeof prev.pid === 'number') {
         process.kill(prev.pid, 'SIGTERM');
       }
-    } catch {
-      // Ignore stale PID parse/kill errors.
+    } catch (error: unknown) {
+      console.warn('[omx] warning: failed to stop stale notify fallback watcher', {
+        path: pidPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
-  await mkdir(join(cwd, '.omx', 'state'), { recursive: true }).catch(() => {});
+  await mkdir(join(cwd, '.omx', 'state'), { recursive: true }).catch((error: unknown) => {
+    console.warn('[omx] warning: failed to create notify fallback watcher state directory', {
+      cwd,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
   const child = spawn(
     process.execPath,
     [watcherScript, '--cwd', cwd, '--notify-script', notifyScript],
@@ -1232,7 +1348,12 @@ async function startNotifyFallbackWatcher(cwd: string): Promise<void> {
   await writeFile(
     pidPath,
     JSON.stringify({ pid: child.pid, started_at: new Date().toISOString() }, null, 2)
-  ).catch(() => {});
+  ).catch((error: unknown) => {
+    console.warn('[omx] warning: failed to write notify fallback watcher pid file', {
+      path: pidPath,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 async function startHookDerivedWatcher(cwd: string): Promise<void> {
@@ -1250,12 +1371,20 @@ async function startHookDerivedWatcher(cwd: string): Promise<void> {
       if (prev && typeof prev.pid === 'number') {
         process.kill(prev.pid, 'SIGTERM');
       }
-    } catch {
-      // Ignore stale PID parse/kill errors.
+    } catch (error: unknown) {
+      console.warn('[omx] warning: failed to stop stale hook-derived watcher', {
+        path: pidPath,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
-  await mkdir(join(cwd, '.omx', 'state'), { recursive: true }).catch(() => {});
+  await mkdir(join(cwd, '.omx', 'state'), { recursive: true }).catch((error: unknown) => {
+    console.warn('[omx] warning: failed to create hook-derived watcher state directory', {
+      cwd,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
   const child = spawn(
     process.execPath,
     [watcherScript, '--cwd', cwd],
@@ -1271,7 +1400,12 @@ async function startHookDerivedWatcher(cwd: string): Promise<void> {
   await writeFile(
     pidPath,
     JSON.stringify({ pid: child.pid, started_at: new Date().toISOString() }, null, 2)
-  ).catch(() => {});
+  ).catch((error: unknown) => {
+    console.warn('[omx] warning: failed to write hook-derived watcher pid file', {
+      path: pidPath,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 async function stopNotifyFallbackWatcher(cwd: string): Promise<void> {
@@ -1284,11 +1418,19 @@ async function stopNotifyFallbackWatcher(cwd: string): Promise<void> {
     if (parsed && typeof parsed.pid === 'number') {
       process.kill(parsed.pid, 'SIGTERM');
     }
-  } catch {
-    // Ignore stop errors.
+  } catch (error: unknown) {
+    console.warn('[omx] warning: failed to stop notify fallback watcher process', {
+      path: pidPath,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
-  await unlink(pidPath).catch(() => {});
+  await unlink(pidPath).catch((error: unknown) => {
+    console.warn('[omx] warning: failed to remove notify fallback watcher pid file', {
+      path: pidPath,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 async function stopHookDerivedWatcher(cwd: string): Promise<void> {
@@ -1301,11 +1443,19 @@ async function stopHookDerivedWatcher(cwd: string): Promise<void> {
     if (parsed && typeof parsed.pid === 'number') {
       process.kill(parsed.pid, 'SIGTERM');
     }
-  } catch {
-    // Ignore stop errors.
+  } catch (error: unknown) {
+    console.warn('[omx] warning: failed to stop hook-derived watcher process', {
+      path: pidPath,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 
-  await unlink(pidPath).catch(() => {});
+  await unlink(pidPath).catch((error: unknown) => {
+    console.warn('[omx] warning: failed to remove hook-derived watcher pid file', {
+      path: pidPath,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }
 
 async function flushNotifyFallbackOnce(cwd: string): Promise<void> {
@@ -1378,8 +1528,6 @@ async function cancelModes(): Promise<void> {
 
     const ralphLinksUltrawork = (state: Record<string, unknown>): boolean =>
       state.linked_ultrawork === true || state.linked_mode === 'ultrawork';
-    const ralphLinksEcomode = (state: Record<string, unknown>): boolean =>
-      state.linked_ecomode === true || state.linked_mode === 'ecomode';
 
     const team = states.get('team');
     const ralph = states.get('ralph');
@@ -1393,14 +1541,12 @@ async function cancelModes(): Promise<void> {
         ralph.state.linked_team_terminal_at = nowIso;
         changed.add('ralph');
         if (ralphLinksUltrawork(ralph.state)) cancelMode('ultrawork', 'cancelled', true);
-        if (ralphLinksEcomode(ralph.state)) cancelMode('ecomode', 'cancelled', true);
       }
     }
 
     if (ralph && ralph.state.active === true) {
       cancelMode('ralph', 'cancelled', true);
       if (ralphLinksUltrawork(ralph.state)) cancelMode('ultrawork', 'cancelled', true);
-      if (ralphLinksEcomode(ralph.state)) cancelMode('ecomode', 'cancelled', true);
     }
 
     if (!hadActiveRalph) {

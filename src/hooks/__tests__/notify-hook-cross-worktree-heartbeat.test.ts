@@ -31,15 +31,22 @@ function runWorkerNotify(
     'last-assistant-message': 'heartbeat',
   };
 
+  const inheritedEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    OMX_TEAM_WORKER: teamWorker,
+    TMUX: '',
+    TMUX_PANE: '',
+  };
+  if (!Object.prototype.hasOwnProperty.call(extraEnv, 'OMX_TEAM_STATE_ROOT')) {
+    delete inheritedEnv.OMX_TEAM_STATE_ROOT;
+  }
+  if (!Object.prototype.hasOwnProperty.call(extraEnv, 'OMX_TEAM_LEADER_CWD')) {
+    delete inheritedEnv.OMX_TEAM_LEADER_CWD;
+  }
+
   return spawnSync(process.execPath, [NOTIFY_HOOK_SCRIPT.pathname, JSON.stringify(payload)], {
     encoding: 'utf8',
-    env: {
-      ...process.env,
-      OMX_TEAM_WORKER: teamWorker,
-      TMUX: '',
-      TMUX_PANE: '',
-      ...extraEnv,
-    },
+    env: { ...inheritedEnv, ...extraEnv },
   });
 }
 

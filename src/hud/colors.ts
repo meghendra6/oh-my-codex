@@ -13,66 +13,50 @@ const RED = '\x1b[31m';
 const GREEN = '\x1b[32m';
 const YELLOW = '\x1b[33m';
 const CYAN = '\x1b[36m';
+let colorEnabled = true;
+
+export function setColorEnabled(enabled: boolean): void {
+  colorEnabled = enabled;
+}
+
+export function isColorEnabled(): boolean {
+  return colorEnabled;
+}
+
+function wrapColor(code: string, text: string): string {
+  if (!colorEnabled) return text;
+  return `${code}${text}${RESET}`;
+}
 
 export function green(text: string): string {
-  return `${GREEN}${text}${RESET}`;
+  return wrapColor(GREEN, text);
 }
 
 export function yellow(text: string): string {
-  return `${YELLOW}${text}${RESET}`;
-}
-
-export function red(text: string): string {
-  return `${RED}${text}${RESET}`;
+  return wrapColor(YELLOW, text);
 }
 
 export function cyan(text: string): string {
-  return `${CYAN}${text}${RESET}`;
+  return wrapColor(CYAN, text);
 }
 
 export function dim(text: string): string {
-  return `${DIM}${text}${RESET}`;
+  return wrapColor(DIM, text);
 }
 
 export function bold(text: string): string {
-  return `${BOLD}${text}${RESET}`;
+  return wrapColor(BOLD, text);
 }
 
 /**
  * Get color code based on ralph iteration progress.
  */
 export function getRalphColor(iteration: number, maxIterations: number): string {
+  if (!colorEnabled) return '';
   const warningThreshold = Math.floor(maxIterations * 0.7);
   const criticalThreshold = Math.floor(maxIterations * 0.9);
 
   if (iteration >= criticalThreshold) return RED;
   if (iteration >= warningThreshold) return YELLOW;
   return GREEN;
-}
-
-/**
- * Get color for todo/turn progress.
- */
-export function getTodoColor(completed: number, total: number): string {
-  if (total === 0) return DIM;
-  const percent = (completed / total) * 100;
-  if (percent >= 80) return GREEN;
-  if (percent >= 50) return YELLOW;
-  return CYAN;
-}
-
-/**
- * Create a colored progress bar.
- */
-export function coloredBar(percent: number, width: number = 10): string {
-  const safeWidth = Number.isFinite(width) ? Math.max(0, Math.round(width)) : 0;
-  const safePercent = Number.isFinite(percent)
-    ? Math.min(100, Math.max(0, percent))
-    : 0;
-
-  const filled = Math.round((safePercent / 100) * safeWidth);
-  const empty = safeWidth - filled;
-
-  const color = safePercent >= 85 ? RED : safePercent >= 70 ? YELLOW : GREEN;
-  return `${color}${'█'.repeat(filled)}${DIM}${'░'.repeat(empty)}${RESET}`;
 }

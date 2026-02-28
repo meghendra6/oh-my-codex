@@ -10,7 +10,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { readFile, writeFile, readdir, mkdir, unlink } from 'fs/promises';
+import { readFile, writeFile, readdir, mkdir, unlink, rename } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import { dirname, join, resolve as resolvePath } from 'path';
 import {
@@ -27,6 +27,18 @@ import { withModeRuntimeContext } from '../state/mode-state-context.js';
 import { ensureTmuxHookInitialized } from '../cli/tmux-hook.js';
 import { RALPH_PHASES, validateAndNormalizeRalphState } from '../ralph/contract.js';
 import { ensureCanonicalRalphArtifacts } from '../ralph/persistence.js';
+import { shouldAutoStartMcpServer } from './bootstrap.js';
+import {
+  TEAM_NAME_SAFE_PATTERN,
+  WORKER_NAME_SAFE_PATTERN,
+  TASK_ID_SAFE_PATTERN,
+  TEAM_TASK_STATUSES,
+  TEAM_EVENT_TYPES,
+  TEAM_TASK_APPROVAL_STATUSES,
+  type TeamTaskStatus,
+  type TeamEventType,
+  type TeamTaskApprovalStatus,
+} from '../team/contracts.js';
 import {
   teamSendMessage as sendDirectMessage,
   teamBroadcast as broadcastMessage,
@@ -56,16 +68,14 @@ import {
   teamWriteMonitorSnapshot,
   teamReadTaskApproval,
   teamWriteTaskApproval,
-  teamSaveConfig,
   type TeamMonitorSnapshotState,
 } from '../team/team-ops.js';
 
 const SUPPORTED_MODES = [
-  'autopilot', 'ultrapilot', 'team', 'pipeline',
-  'ralph', 'ultrawork', 'ultraqa', 'ecomode', 'ralplan',
+  'autopilot', 'team',
+  'ralph', 'ultrawork', 'ultraqa', 'ralplan',
 ] as const;
 
-type Mode = typeof SUPPORTED_MODES[number];
 const STATE_TOOL_NAMES = new Set([
   'state_read',
   'state_write',
@@ -104,27 +114,40 @@ const TEAM_COMM_TOOL_NAMES = new Set([
   'team_write_task_approval',
 ]);
 
-const TEAM_NAME_SAFE_PATTERN = /^[a-z0-9][a-z0-9-]{0,29}$/;
-const WORKER_NAME_SAFE_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const TASK_ID_SAFE_PATTERN = /^\d{1,20}$/;
-const TEAM_TASK_STATUSES = ['pending', 'blocked', 'in_progress', 'completed', 'failed'] as const;
-const TEAM_EVENT_TYPES = [
-  'task_completed',
-  'task_failed',
-  'worker_idle',
-  'worker_stopped',
-  'message_received',
-  'shutdown_ack',
-  'approval_decision',
-  'team_leader_nudge',
-] as const;
-const TEAM_TASK_APPROVAL_STATUSES = ['pending', 'approved', 'rejected'] as const;
 const TEAM_UPDATE_TASK_MUTABLE_FIELDS = new Set(['subject', 'description', 'blocked_by', 'requires_code_change']);
 const TEAM_UPDATE_TASK_REQUEST_FIELDS = new Set(['team_name', 'task_id', 'workingDirectory', ...TEAM_UPDATE_TASK_MUTABLE_FIELDS]);
+const stateWriteQueues = new Map<string, Promise<void>>();
 
-type TeamTaskStatus = typeof TEAM_TASK_STATUSES[number];
-type TeamEventType = typeof TEAM_EVENT_TYPES[number];
-type TeamTaskApprovalStatus = typeof TEAM_TASK_APPROVAL_STATUSES[number];
+async function withStateWriteLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
+  const tail = stateWriteQueues.get(path) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const queued = tail.finally(() => gate);
+  stateWriteQueues.set(path, queued);
+
+  await tail.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (stateWriteQueues.get(path) === queued) {
+      stateWriteQueues.delete(path);
+    }
+  }
+}
+
+async function writeAtomicFile(path: string, data: string): Promise<void> {
+  const tmpPath = `${path}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}`;
+  await writeFile(tmpPath, data, 'utf-8');
+  try {
+    await rename(tmpPath, path);
+  } catch (error) {
+    await unlink(tmpPath).catch(() => {});
+    throw error;
+  }
+}
 
 function isFiniteInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && Number.isFinite(value);
@@ -723,7 +746,15 @@ export async function handleStateToolCall(request: {
 }) {
   const { name, arguments: args } = request.params;
   const wd = (args as Record<string, unknown>)?.workingDirectory as string | undefined;
-  const normalizedWd = resolveWorkingDirectoryForState(wd);
+  let normalizedWd: string;
+  try {
+    normalizedWd = resolveWorkingDirectoryForState(wd);
+  } catch (error) {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ error: (error as Error).message }) }],
+      isError: true,
+    };
+  }
   let cwd = normalizedWd;
   let explicitSessionId: string | undefined;
   try {
@@ -782,6 +813,12 @@ export async function handleStateToolCall(request: {
   switch (name) {
     case 'state_read': {
       const mode = (args as Record<string, unknown>).mode as string;
+      if (!SUPPORTED_MODES.includes(mode as typeof SUPPORTED_MODES[number])) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: `mode must be one of: ${SUPPORTED_MODES.join(', ')}` }) }],
+          isError: true,
+        };
+      }
       const paths = await getReadScopedStatePaths(mode, cwd, explicitSessionId);
       const path = paths.find((candidate) => existsSync(candidate));
       if (!path) {
@@ -794,14 +831,6 @@ export async function handleStateToolCall(request: {
     case 'state_write': {
       const mode = (args as Record<string, unknown>).mode as string;
       const path = getStatePath(mode, cwd, effectiveSessionId);
-
-      let existing: Record<string, unknown> = {};
-      if (existsSync(path)) {
-        try {
-          existing = JSON.parse(await readFile(path, 'utf-8'));
-        } catch { /* start fresh */ }
-      }
-
       const {
         mode: _m,
         workingDirectory: _w,
@@ -809,36 +838,47 @@ export async function handleStateToolCall(request: {
         state: customState,
         ...fields
       } = args as Record<string, unknown>;
-      const mergedRaw = { ...existing, ...fields, ...(customState as Record<string, unknown> || {}) } as Record<string, unknown>;
+      let validationError: string | null = null;
+      await withStateWriteLock(path, async () => {
+        let existing: Record<string, unknown> = {};
+        if (existsSync(path)) {
+          try {
+            existing = JSON.parse(await readFile(path, 'utf-8'));
+          } catch { /* start fresh */ }
+        }
 
-      if (mode === 'ralph') {
-        const originalPhase = mergedRaw.current_phase;
-        const validation = validateAndNormalizeRalphState(mergedRaw);
-        if (!validation.ok || !validation.state) {
-          return {
-            content: [{
-              type: 'text',
-              text: JSON.stringify({
-                error: validation.error || `ralph.current_phase must be one of: ${RALPH_PHASES.join(', ')}`,
-              }),
-            }],
-            isError: true,
-          };
+        const mergedRaw = { ...existing, ...fields, ...(customState as Record<string, unknown> || {}) } as Record<string, unknown>;
+
+        if (mode === 'ralph') {
+          const originalPhase = mergedRaw.current_phase;
+          const validation = validateAndNormalizeRalphState(mergedRaw);
+          if (!validation.ok || !validation.state) {
+            validationError = validation.error || `ralph.current_phase must be one of: ${RALPH_PHASES.join(', ')}`;
+            return;
+          }
+          if (
+            typeof originalPhase === 'string'
+            && typeof validation.state.current_phase === 'string'
+            && validation.state.current_phase !== originalPhase
+          ) {
+            validation.state.ralph_phase_normalized_from = originalPhase;
+          }
+          Object.assign(mergedRaw, validation.state);
+          await ensureCanonicalRalphArtifacts(cwd, effectiveSessionId);
         }
-        if (
-          typeof originalPhase === 'string'
-          && typeof validation.state.current_phase === 'string'
-          && validation.state.current_phase !== originalPhase
-        ) {
-          validation.state.ralph_phase_normalized_from = originalPhase;
-        }
-        Object.assign(mergedRaw, validation.state);
-        await ensureCanonicalRalphArtifacts(cwd, effectiveSessionId);
+
+        const merged = withModeRuntimeContext(existing, mergedRaw);
+        await writeAtomicFile(path, JSON.stringify(merged, null, 2));
+      });
+      if (validationError) {
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ error: validationError }),
+          }],
+          isError: true,
+        };
       }
-
-      const merged = withModeRuntimeContext(existing, mergedRaw);
-
-      await writeFile(path, JSON.stringify(merged, null, 2));
       return { content: [{ type: 'text', text: JSON.stringify({ success: true, mode, path }) }] };
     }
 
@@ -1401,7 +1441,7 @@ export async function handleStateToolCall(request: {
 server.setRequestHandler(CallToolRequestSchema, handleStateToolCall);
 
 // Start server
-if (process.env.OMX_STATE_SERVER_DISABLE_AUTO_START !== '1') {
+if (shouldAutoStartMcpServer('state')) {
   const transport = new StdioServerTransport();
   server.connect(transport).catch(console.error);
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm } from 'fs/promises';
 import { existsSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { join, resolve as resolvePath } from 'path';
 import {
   getAllScopedStateDirs,
   getAllScopedStatePaths,
@@ -13,6 +13,7 @@ import {
   resolveWorkingDirectoryForState,
   getStateDir,
   getStatePath,
+  validateStateModeSegment,
   validateSessionId,
 } from '../state-paths.js';
 
@@ -29,6 +30,19 @@ describe('validateSessionId', () => {
   });
 });
 
+describe('validateStateModeSegment', () => {
+  it('accepts safe mode names', () => {
+    assert.equal(validateStateModeSegment('ralph'), 'ralph');
+    assert.equal(validateStateModeSegment('ultraqa'), 'ultraqa');
+  });
+
+  it('rejects traversal and path separators', () => {
+    assert.throws(() => validateStateModeSegment('../evil'), /must not contain "\.\."/);
+    assert.throws(() => validateStateModeSegment('foo/bar'), /path separators/);
+    assert.throws(() => validateStateModeSegment('foo\\bar'), /path separators/);
+  });
+});
+
 describe('state paths', () => {
   it('resolveWorkingDirectoryForState defaults to process.cwd()', () => {
     assert.equal(resolveWorkingDirectoryForState(undefined), process.cwd());
@@ -38,15 +52,44 @@ describe('state paths', () => {
 
   it('resolveWorkingDirectoryForState normalizes Windows path on WSL/Linux when mount exists', () => {
     const raw = 'D:\\SIYUAN\\external\\repo';
-    const normalized = resolveWorkingDirectoryForState(raw);
     if (process.platform === 'win32') {
-      assert.equal(normalized, raw);
+      assert.equal(resolveWorkingDirectoryForState(raw), resolvePath(raw));
       return;
     }
     if (existsSync('/mnt/d')) {
-      assert.equal(normalized, '/mnt/d/SIYUAN/external/repo');
+      assert.equal(resolveWorkingDirectoryForState(raw), '/mnt/d/SIYUAN/external/repo');
     } else {
-      assert.equal(normalized, raw);
+      assert.throws(() => resolveWorkingDirectoryForState(raw), /not available on this host/);
+    }
+  });
+
+  it('resolveWorkingDirectoryForState returns absolute normalized paths', () => {
+    assert.equal(resolveWorkingDirectoryForState('.'), process.cwd());
+  });
+
+  it('rejects NUL bytes in workingDirectory', () => {
+    assert.throws(() => resolveWorkingDirectoryForState('bad\0path'), /NUL byte/);
+  });
+
+  it('enforces OMX_MCP_WORKDIR_ROOTS allowlist when configured', async () => {
+    const allowedRoot = await mkdtemp(join(tmpdir(), 'omx-allowed-root-'));
+    const disallowedRoot = await mkdtemp(join(tmpdir(), 'omx-disallowed-root-'));
+    const prev = process.env.OMX_MCP_WORKDIR_ROOTS;
+    process.env.OMX_MCP_WORKDIR_ROOTS = allowedRoot;
+    try {
+      assert.equal(
+        resolveWorkingDirectoryForState(join(allowedRoot, 'nested')),
+        join(allowedRoot, 'nested'),
+      );
+      assert.throws(
+        () => resolveWorkingDirectoryForState(disallowedRoot),
+        /outside allowed roots \(OMX_MCP_WORKDIR_ROOTS\)/,
+      );
+    } finally {
+      if (typeof prev === 'string') process.env.OMX_MCP_WORKDIR_ROOTS = prev;
+      else delete process.env.OMX_MCP_WORKDIR_ROOTS;
+      await rm(allowedRoot, { recursive: true, force: true });
+      await rm(disallowedRoot, { recursive: true, force: true });
     }
   });
 
@@ -63,6 +106,10 @@ describe('state paths', () => {
       getStatePath('ralph', '/repo', 'sess1'),
       '/repo/.omx/state/sessions/sess1/ralph-state.json'
     );
+  });
+
+  it('throws when mode contains traversal tokens', () => {
+    assert.throws(() => getStatePath('../../etc/passwd', '/repo'), /must not contain "\.\."/);
   });
 
   it('enumerates global-only path', async () => {
