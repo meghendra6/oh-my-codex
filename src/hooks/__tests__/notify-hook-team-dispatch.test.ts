@@ -344,7 +344,7 @@ describe('notify-hook team dispatch consumer', () => {
     }
   });
 
-  it('allows exactly one retry fallback retype when retry pre-capture is missing trigger', async () => {
+  it('retypes on every retry when trigger is not in narrow input area', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'omx-hook-team-dispatch-'));
     const fakeBinDir = join(cwd, 'fake-bin');
     const tmuxLogPath = join(cwd, 'tmux.log');
@@ -355,12 +355,15 @@ describe('notify-hook team dispatch consumer', () => {
       await mkdir(fakeBinDir, { recursive: true });
       await writeFile(join(fakeBinDir, 'tmux'), buildFakeTmux(tmuxLogPath));
       await chmod(join(fakeBinDir, 'tmux'), 0o755);
+      // Each verify round now does narrow + wide capture (2 calls per round).
+      // Pre-capture on retries returns 'ready' (no trigger) to allow retype.
       await writeFile(captureSeqFile, [
-        'ping', 'ping', 'ping', // tick1 verify rounds => unconfirmed
-        'ready', // tick2 pre-capture => fallback retype eligible
-        'ping', 'ping', 'ping', // tick2 verify => still unconfirmed
-        'ready', // tick3 pre-capture => no more fallback retype (attempt>=2)
-        'ping', 'ping', 'ping', // tick3 verify => fail at max retries
+        // tick1: 3 verify rounds × 2 captures = 6
+        'ping', 'ping', 'ping', 'ping', 'ping', 'ping',
+        // tick2: 1 pre-capture + 3 verify rounds × 2 captures = 7
+        'ready', 'ping', 'ping', 'ping', 'ping', 'ping', 'ping',
+        // tick3: 1 pre-capture + 3 verify rounds × 2 captures = 7
+        'ready', 'ping', 'ping', 'ping', 'ping', 'ping', 'ping',
       ].join('\n'));
       process.env.PATH = `${fakeBinDir}:${previousPath || ''}`;
       process.env.OMX_TEST_CAPTURE_SEQUENCE_FILE = captureSeqFile;
@@ -383,7 +386,8 @@ describe('notify-hook team dispatch consumer', () => {
 
       const tmuxLog = await readFile(tmuxLogPath, 'utf8');
       const typeMatches = tmuxLog.match(/send-keys -t %42 -l ping/g) || [];
-      assert.equal(typeMatches.length, 2, 'should allow one fallback retry retype total (fresh + one retry)');
+      // With narrow capture, retypes on every retry when trigger is not in input area
+      assert.equal(typeMatches.length, 3, 'should retype on every retry when trigger not in narrow capture (fresh + 2 retries)');
 
       const request = await readDispatchRequest('alpha', queued.request.request_id, cwd);
       assert.equal(request?.status, 'failed');

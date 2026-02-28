@@ -2,7 +2,7 @@
  * Team worker: heartbeat, idle detection, and leader notification.
  */
 
-import { readFile, writeFile, mkdir, appendFile, rename } from 'fs/promises';
+import { readFile, writeFile, mkdir, appendFile, rename, stat } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join, resolve as resolvePath } from 'path';
 import { asNumber, safeString } from './utils.js';
@@ -127,7 +127,18 @@ async function readWorkerStatusSnapshot(stateDir, teamName, workerName, nowMs = 
     const parsed = JSON.parse(raw);
     const state = parsed && typeof parsed.state === 'string' ? parsed.state : 'unknown';
     const updatedAt = parsed && typeof parsed.updated_at === 'string' ? parsed.updated_at : null;
-    const fresh = isFreshIso(updatedAt, resolveStatusStaleMs(), nowMs);
+    let fresh = false;
+    if (updatedAt) {
+      fresh = isFreshIso(updatedAt, resolveStatusStaleMs(), nowMs);
+    } else {
+      // Fallback: if worker omits updated_at, use file mtime as staleness proxy
+      try {
+        const st = await stat(statusPath);
+        fresh = (nowMs - st.mtimeMs) <= resolveStatusStaleMs();
+      } catch {
+        fresh = false;
+      }
+    }
     return { state, updated_at: updatedAt, fresh };
   } catch {
     return { state: 'unknown', updated_at: null, fresh: false };
@@ -314,7 +325,18 @@ export async function maybeNotifyLeaderWorkerIdle({ cwd, stateDir, logsDir, pars
       if (parsed && typeof parsed.state === 'string') currentState = parsed.state;
       if (parsed && typeof parsed.current_task_id === 'string') currentTaskId = parsed.current_task_id;
       if (parsed && typeof parsed.reason === 'string') currentReason = parsed.reason;
-      statusFresh = isFreshIso(parsed && typeof parsed.updated_at === 'string' ? parsed.updated_at : null, resolveStatusStaleMs(), nowMs);
+      const updatedAtField = parsed && typeof parsed.updated_at === 'string' ? parsed.updated_at : null;
+      if (updatedAtField) {
+        statusFresh = isFreshIso(updatedAtField, resolveStatusStaleMs(), nowMs);
+      } else {
+        // Fallback: use file mtime when worker omits updated_at
+        try {
+          const st = await stat(statusPath);
+          statusFresh = (nowMs - st.mtimeMs) <= resolveStatusStaleMs();
+        } catch {
+          statusFresh = false;
+        }
+      }
     }
   } catch { /* ignore */ }
 
@@ -339,7 +361,7 @@ export async function maybeNotifyLeaderWorkerIdle({ cwd, stateDir, logsDir, pars
   // Only fire on working->idle transition (non-idle to idle)
   if (currentState !== 'idle') return;
   if (!statusFresh) return;
-  if (prevState === 'idle' || prevState === 'done' || prevState === 'unknown') return;
+  if (prevState === 'idle' || prevState === 'done') return;
 
   const heartbeat = await readWorkerHeartbeatSnapshot(stateDir, teamName, workerName, nowMs);
   if (!heartbeat.fresh) return;

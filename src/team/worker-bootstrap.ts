@@ -52,7 +52,7 @@ You are a team worker in team "${teamName}". Your identity and assigned tasks ar
 7. Request a claim via the state API (claimTask); do not directly set status to "in_progress" in the task file
 8. Do the work using your tools
 9. On completion: write {"status": "completed", "result": "summary of what was done"} to the task file
-10. Update your status: write {"state": "idle"} to <team_state_root>/team/${teamName}/workers/{your-name}/status.json
+10. Update your status: write {"state": "idle", "updated_at": "<current ISO timestamp>"} to <team_state_root>/team/${teamName}/workers/{your-name}/status.json
 11. Wait for new instructions (the lead will send them via your terminal)
 12. Check your mailbox for messages at <team_state_root>/team/${teamName}/mailbox/{your-name}.json
 13. For team_* MCP tools, do not pass workingDirectory unless the lead explicitly tells you to
@@ -278,7 +278,7 @@ ${taskList}
 7. Request a claim via state API (\`claimTask\`) to claim it
 8. Complete the work described in the task
 9. Write \`{"status": "completed", "result": "brief summary"}\` to the task file
-10. Write \`{"state": "idle"}\` to \`${teamStateRoot}/team/${teamName}/workers/${workerName}/status.json\`
+10. Write \`{"state": "idle", "updated_at": "<current ISO timestamp>"}\` to \`${teamStateRoot}/team/${teamName}/workers/${workerName}/status.json\`
 11. Wait for the next instruction from the lead
 12. For team_* MCP tools, do not pass \`workingDirectory\` unless the lead explicitly asks (if resolution fails, use leader cwd: \`${leaderCwd}\`)
 
@@ -318,7 +318,7 @@ ${taskDescription}
 3. Request a claim via state API (\`claimTask\`)
 4. Complete the work
 5. Write \`{"status": "completed", "result": "brief summary"}\` when done
-6. Write \`{"state": "idle"}\` to your status file
+6. Write \`{"state": "idle", "updated_at": "<current ISO timestamp>"}\` to your status file
 
 ${buildVerificationSection(taskDescription)}
 `;

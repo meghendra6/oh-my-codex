@@ -567,7 +567,7 @@ describe('notify-hook per-worker idle notification', () => {
     });
   });
 
-  it('does not fire on first invocation when no prev state file exists (unknown->idle)', async () => {
+  it('fires on first invocation when no prev state file exists (unknown->idle)', async () => {
     await withTempWorkingDir(async (cwd) => {
       const stateDir = join(cwd, '.omx', 'state');
       const logsDir = join(cwd, '.omx', 'logs');
@@ -601,10 +601,9 @@ describe('notify-hook per-worker idle notification', () => {
       const result = runNotifyHookAsWorker(cwd, fakeBinDir, `${teamName}/worker-1`);
       assert.equal(result.status, 0, `notify-hook failed: ${result.stderr || result.stdout}`);
 
-      if (existsSync(tmuxLogPath)) {
-        const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
-        assert.doesNotMatch(tmuxLog, /worker-1 idle/, 'should NOT fire on unknown->idle transition');
-      }
+      assert.ok(existsSync(tmuxLogPath), 'tmux should have been called for unknown->idle');
+      const tmuxLog = await readFile(tmuxLogPath, 'utf-8');
+      assert.match(tmuxLog, /worker-1 idle/, 'should fire on unknown->idle transition');
     });
   });
 
